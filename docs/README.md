@@ -21,6 +21,7 @@
 - [普通键盘输入与 END 的停止边界](research/2026-11-21-keyboard-tick.md)
 - [暂停确认、箱子状态同步与停止截图](research/2026-11-21-stop-frame.md)
 - [END 停止帧中的玩家红心和实体位置](research/2026-11-21-world-stop-frame.md)
+- [26.3 玩家受伤与客户端生命值更新](research/2026-11-22-hp-lost.md)
 - [Codex 通过 Rust MCP 直接观察 Minecraft 停止帧](research/2026-11-21-codex-image.md)
 - [Codex 在两种 GUI 缩放下看图取出钻石](research/2026-11-21-codex-gui-click.md)
 - [Codex 第一人称瞄准与持续挖掘](research/2026-11-21-first-person-mining.md)
