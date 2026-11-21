@@ -12,10 +12,10 @@ from PIL import Image
 
 
 PROMPT = """只用 minecraft MCP 的游戏截图观察这个单人世界。让准星对准红色方块的中心。
-先调用 inspect_input，记录开始时脚本左键的保持方式，以及队列里首段的 source。随后调用一次 input_script 做零拍观察，传 include_screenshot=false，只取状态。再用默认参数取得截图，调用 cursor_hint 在你选的点标记并看图核对，再按返回的转角转动视角。
+先调用 inspect_input，记录开始时脚本左键的保持方式，以及队列里首段的 source。随后调用 input_script 注册 ON(HpLost)，处理块首行写 PAUSE，顶层执行 Wait(1)。传 include_screenshot=false，记录本次停止的监听事件名。再调用 inspect_input 核对待续队列。再用默认参数取得截图，调用 cursor_hint 在你选的点标记并看图核对，再按返回的转角转动视角。
 请保持站位不动，用停止帧检查最后准星是否在方块上；需要时可重新选点微调。
 脚本语法按需查阅，入口为 docs/input-script/README.md。读取资料时每次只执行 cat 加一个或多个文档相对路径；
-只从工具返回的图片判断游戏内容。最后返回 JSON，包含 initial_left（首次查询得到的左键保持方式）、next_input（待执行首段的 source）、centered（布尔值）与 observation（你看到的情况）。"""
+只从工具返回的图片判断游戏内容。最后返回 JSON，包含 initial_left（首次查询得到的左键保持方式）、next_input（待执行首段的 source）、event（本次暂停的监听事件名）、centered（布尔值）与 observation（你看到的情况）。"""
 
 
 def red(pixel):
@@ -59,7 +59,7 @@ def verify_session(trial, docs):
                 continue
             assert item["status"] == "completed", item.get("error")
             if item["tool"] == "inspect_input":
-                if not frames:
+                if not saw_inspect:
                     state = json.loads(result["content"][0]["text"])
                     assert state["world"] == "paused" and state["held"]["buttons"]["left"] == "temporary", state
                     assert state["pause_reason"] == "pause" and state["queue"]["entries"][0]["source"] == "Wait(1)"
@@ -69,6 +69,7 @@ def verify_session(trial, docs):
                 text, = result["content"]
                 status = json.loads(text["text"])
                 assert text["type"] == "text" and status["world"] == "paused" and "screenshot_id" not in status
+                assert status["pause_reason"] == "pause" and [x["event"] for x in status["pause_listeners"]] == ["HpLost"], status
                 saw_text_only = True
                 continue
             text, image = result["content"]
@@ -81,7 +82,7 @@ def verify_session(trial, docs):
             (trial / f"{count:02d}-{tool}.png").write_bytes(data)
             if tool == "input_script":
                 assert status["world"] == "paused"
-                if not frames:
+                if not saw_inspect:
                     assert not centered(rgb), "initial pose already points at the landmark"
                 frames[status["screenshot_id"]] = rgb
                 script = item["arguments"]["script"]
@@ -98,7 +99,7 @@ def verify_session(trial, docs):
     assert saw_inspect and saw_text_only and saw_target_hint and saw_turn, "missing on-target hint or subsequent angular movement"
     assert centered(final), "final frame missed the red landmark"
     answer = json.loads((trial / "answer.json").read_text())
-    assert answer["initial_left"] == "temporary" and answer["next_input"] == "Wait(1)" and answer["centered"] is True and answer["observation"].strip(), answer
+    assert answer["event"] == "HpLost" and answer["initial_left"] == "temporary" and answer["next_input"] == "Wait(1)" and answer["centered"] is True and answer["observation"].strip(), answer
     print(f"PASS: Codex saw {count} MCP images and centered the selected red block. Evidence: {trial}", flush=True)
 
 
@@ -108,8 +109,8 @@ def exercise_codex(work, env, binary):
     trial.mkdir()
     schema = trial / "answer.schema.json"
     schema.write_text(json.dumps({
-        "type": "object", "properties": {"initial_left": {"type": "string"}, "next_input": {"type": "string"}, "centered": {"type": "boolean"}, "observation": {"type": "string"}},
-        "required": ["initial_left", "next_input", "centered", "observation"], "additionalProperties": False,
+        "type": "object", "properties": {"event": {"type": "string"}, "initial_left": {"type": "string"}, "next_input": {"type": "string"}, "centered": {"type": "boolean"}, "observation": {"type": "string"}},
+        "required": ["event", "initial_left", "next_input", "centered", "observation"], "additionalProperties": False,
     }))
     with tempfile.TemporaryDirectory(prefix="mc-codex-docs-") as directory:
         runner = Path(directory)

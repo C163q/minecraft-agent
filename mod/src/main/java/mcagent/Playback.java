@@ -1,7 +1,11 @@
 package mcagent;
 
+import java.nio.file.Path;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import net.minecraft.resources.Identifier;
+import org.slf4j.LoggerFactory;
 import com.google.gson.JsonObject;
-import com.mojang.blaze3d.platform.NativeImage;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
@@ -15,6 +19,7 @@ import net.minecraft.network.protocol.game.ClientboundSetHealthPacket;
 /** Playback belongs to the client thread. Only the stop fence crosses to the server thread. */
 public final class Playback {
     public static final Playback INSTANCE = new Playback();
+    public static final Identifier HURT_SIGNAL = Identifier.fromNamespaceAndPath("minecraft_agent", "hurt");
     private static final double DEFAULT_MAX_SPEED = 50;
     private final KeyDispatch keys = new KeyDispatch();
     private final MouseDispatch mouse = new MouseDispatch();
@@ -27,6 +32,10 @@ public final class Playback {
     private Request active;
     private boolean running, inTick, appliedInput, hotkeyStop, resumeAfterCapture;
     private String pauseReason;
+    private List<InputQueue.Origin> pauseListeners = List.of();
+    private List<Path> screenshotPaths = List.of();
+    private long captureGeneration;
+    private boolean renderReady, capturing;
     private boolean freeze, pauseConfirmed;
     // A native-menu END returns ownership to that menu once its stopped frame is delivered.
     private boolean endInNativeMenu;
@@ -34,19 +43,17 @@ public final class Playback {
     private int nextMarker = new Random().nextInt();
 
     record Snapshot(ClientLevel level, Set<String> persistent) {}
-    record Observation(long ticks, String world, String pauseReason, NativeImage image, FrameCamera.View camera) implements AutoCloseable {
-        @Override public void close() { if (image != null) image.close(); }
-    }
+    record Observation(long ticks, String world, String pauseReason, List<InputQueue.Origin> listeners,
+                       byte[] png, FrameCamera.View camera) {}
     record Held(Map<String,String> keys, Map<String,String> buttons) {}
     record InputState(String world, Held held, List<Movement.Pending<?>> moves, double max_speed_px_per_tick,
-                      String pause_reason, List<InputQueue.Entry> queue_entries) {}
+                      String pause_reason, List<InputQueue.ListenerState> listeners, List<InputQueue.Entry> queue_entries) {}
 
     private record Fence(IntegratedServer server, int id) {}
     private static final class Request {
         final CompletableFuture<Observation> result = new CompletableFuture<>();
         final boolean includeScreenshot;
         long executed;
-        boolean renderReady;
 
         Request(JsonObject program) {
             var option = program.get("include_screenshot");
@@ -69,13 +76,14 @@ public final class Playback {
         if (!supports(mc)) throw new IllegalStateException("requires a local single-player world or menu");
         boolean sameLevel = level == mc.level;
         String world = worldState(mc);
-        if (!sameLevel) return new InputState(world, new Held(Map.of(), Map.of()), List.of(), DEFAULT_MAX_SPEED, null, List.of());
+        if (!sameLevel) return new InputState(world, new Held(Map.of(), Map.of()), List.of(), DEFAULT_MAX_SPEED, null, List.of(), List.of());
         return new InputState(world, new Held(keys.inspect(queue.persistent()), mouse.inspectButtons()),
-            mouse.inspectMoves(), maxSpeed, nativeEndReleased(mc) ? null : pauseReason, queue.inspect());
+            mouse.inspectMoves(), maxSpeed, nativeEndReleased(mc) ? null : pauseReason, queue.listeners(), queue.inspect());
     }
 
     CompletableFuture<Observation> start(Minecraft mc, Snapshot snapshot, JsonObject program) {
         checkContext(mc);
+        if (!screenshotPaths.isEmpty() || capturing) throw new IllegalStateException("a frame capture is completing");
         if (active != null || snapshot.level != mc.level || !supports(mc))
             throw new IllegalStateException("game context changed; inspect the game before resubmitting");
         if (!program.has("queue_version") && !queue.persistent().equals(snapshot.persistent))
@@ -138,6 +146,10 @@ public final class Playback {
         running = inTick = appliedInput = hotkeyStop = resumeAfterCapture = false;
         freeze = pauseConfirmed = endInNativeMenu = false;
         pauseReason = null;
+        pauseListeners = List.of();
+        screenshotPaths = List.of();
+        renderReady = capturing = false;
+        captureGeneration++;
         fence.set(null);
         queue.reset();
         codes.clear();
@@ -153,7 +165,7 @@ public final class Playback {
         if (!supports(mc)) return;
         if (pauseReason != null) {
             // The outstanding peer must receive the confirmed frame even if the player resumes immediately.
-            if (active != null) resumeAfterCapture = !resumeAfterCapture;
+            if (active != null || !screenshotPaths.isEmpty()) resumeAfterCapture = !resumeAfterCapture;
             else resume(mc);
         } else if (inTick) {
             hotkeyStop = !hotkeyStop;
@@ -164,14 +176,20 @@ public final class Playback {
 
     private void resume(Minecraft mc) {
         running = true;
+        renderReady = false;
         freeze = pauseConfirmed = endInNativeMenu = resumeAfterCapture = false;
         pauseReason = null;
         fence.set(null);
         resolveControls(mc);
     }
 
+    public void observe(Minecraft mc, String event) {
+        if (mc.level != null && mc.level == level && supports(mc)) queue.observe(event);
+    }
+
     public boolean beforeTick(Minecraft mc) {
         checkContext(mc);
+        if (running && queue.hasObserved()) resolveControls(mc);
         if (freeze && !mc.isPaused()) return false; // Suppress catch-up ticks in the stopping frame.
         if (mc.isPaused() && !mc.gui.isPausing()) return true;
         inTick = true;
@@ -207,19 +225,24 @@ public final class Playback {
         String boundary = queue.controls(mouse::pending, mouse::clearMoves);
         if (hotkeyStop) {
             hotkeyStop = false;
-            boundary = "hotkey";
+            if (queue.pauseListeners().isEmpty()) boundary = "hotkey";
         }
+        screenshotPaths = queue.takeScreenshots();
+        if (boundary == null && !screenshotPaths.isEmpty()) boundary = "capture";
         if (boundary != null) stop(mc, boundary);
     }
 
     private void stop(Minecraft mc, String reason) {
         running = false;
         pauseReason = reason;
+        pauseListeners = reason.equals("pause") ? queue.pauseListeners() : List.of();
+        renderReady = false;
+        captureGeneration++;
         freeze = mc.level != null;
         endInNativeMenu = freeze && reason.equals("end") && mc.gui.isPausing();
         pauseConfirmed = false;
         if (mc.level != null) fence.set(new Fence(mc.getSingleplayerServer(), ++nextMarker));
-        else if (active != null) active.renderReady = true;
+        else renderReady = true;
     }
 
     public void serverTick(IntegratedServer server) {
@@ -238,39 +261,73 @@ public final class Playback {
     public void marker(int id) {
         if (pauseReason != null && nextMarker == id) {
             pauseConfirmed = freeze;
-            if (active != null) active.renderReady = true;
+            renderReady = true;
         }
     }
 
     public void afterRender(Minecraft mc) {
         checkContext(mc);
         var r = active;
-        if (r == null) {
+        if (r == null && screenshotPaths.isEmpty()) {
             if (endInNativeMenu && pauseConfirmed) freeze = false;
             return;
         }
-        if (!r.renderReady || (freeze && !mc.isPaused())) return;
-        r.renderReady = false;
+        if (!renderReady || (freeze && !mc.isPaused()) || capturing) return;
+        renderReady = false;
         String world = worldState(mc);
         String reason = pauseReason;
-        if (!r.includeScreenshot) {
-            completeStop(mc, r, new Observation(r.executed, world, reason, null, null));
+        boolean intermediate = "capture".equals(reason);
+        boolean returnImage = r != null && r.includeScreenshot && !intermediate;
+        if (!returnImage && screenshotPaths.isEmpty()) {
+            completeStop(mc, r, world, reason, null, null);
             return;
         }
+        final long generation = captureGeneration;
+        var paths = screenshotPaths;
         try {
-            var camera = FrameCamera.snapshot(mc);
-            Screenshot.takeScreenshot(mc.gameRenderer.mainRenderTarget(), image ->
-                mc.execute(() -> completeStop(mc, r, new Observation(r.executed, world, reason, image, camera))));
+            capturing = true;
+            var camera = returnImage ? FrameCamera.snapshot(mc) : null;
+            Screenshot.takeScreenshot(mc.gameRenderer.mainRenderTarget(), image -> {
+                CompletableFuture.supplyAsync(() -> {
+                    try (image) {
+                        return FrameFiles.encode(image, paths);
+                    } catch (IOException error) {
+                        throw new UncheckedIOException(error);
+                    }
+                }).whenComplete((png, failure) -> mc.execute(() -> {
+                    if (captureGeneration != generation) return;
+                    capturing = false;
+                    screenshotPaths = List.of();
+                    if (failure != null) captureFailed(mc, failure);
+                    else if (intermediate) {
+                        if (resumeAfterCapture) {
+                            resumeAfterCapture = false;
+                            stop(mc, "hotkey");
+                        }
+                        else resume(mc);
+                    } else completeStop(mc, r, world, reason, returnImage ? png : null, camera);
+                }));
+            });
         } catch (RuntimeException error) {
-            reset(mc, "stop-frame capture failed: " + error.getMessage());
+            captureFailed(mc, error);
         }
     }
 
-    private void completeStop(Minecraft mc, Request r, Observation observation) {
-        if (active != r) { observation.close(); return; }
+    private void captureFailed(Minecraft mc, Throwable failure) {
+        var request = active;
         active = null;
-        if (endInNativeMenu && observation.world().equals("not_needed") && mc.gui.isPausing()) freeze = false;
-        r.result.complete(observation);
+        screenshotPaths = List.of();
+        capturing = resumeAfterCapture = false;
+        if ("capture".equals(pauseReason)) pauseReason = "pause";
+        if (request != null) request.result.completeExceptionally(failure);
+        else LoggerFactory.getLogger("minecraft-agent").warn("Frame capture failed", failure);
+        if (endInNativeMenu && mc.gui.isPausing()) freeze = false;
+    }
+
+    private void completeStop(Minecraft mc, Request r, String world, String reason, byte[] png, FrameCamera.View camera) {
+        active = null;
+        if (endInNativeMenu && world.equals("not_needed") && mc.gui.isPausing()) freeze = false;
+        if (r != null) r.result.complete(new Observation(r.executed, world, reason, pauseListeners, png, camera));
         if (resumeAfterCapture) resume(mc);
     }
 }

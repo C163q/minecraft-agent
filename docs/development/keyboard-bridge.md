@@ -64,3 +64,9 @@ python3 tests/game/run.py /absolute/game-root/versions/26.3-Fabric/26.3-Fabric.j
 加上 `--codex` 可在同一测试世界运行独立 Codex CLI 会话。它从语法参考查找写法，通过正式 MCP 的图片选中红色方块，使用返回的角度瞄准，再观察停止帧。需要已配置的 Codex CLI 和模型访问权限。可以通过 `MINECRAFT_AGENT_CODEX_MODEL` 选择模型。测试把该会话的图片和工具调用保存在当次测试目录的 `codex-mouse/`。
 
 PAUSE 和跨块覆盖需要同时更新 MCP 与 Mod。旧 MCP 发送每拍的目标键集合，Mod 可以执行旧脚本；若在其 END 前用实体快捷键中断，旧协议不足以区分本块中新出现的临时和显式按住。此时使用新版客户端以 `CLEAR` 丢弃旧块，能保留此前已确认且尚未释放的显式状态。新版协议逐拍发送每个键的操作，能完整区分这两种情况。
+
+## 事件与显式截图
+
+事件脚本要求握手能力 `input_events`。MCP 校验处理块的键名，传入声明的源行、事件名和处理体。`InputQueue` 在客户端观察到事件时确定监听资格，在输入边界按注册顺序激活处理块。见[用户语法](../input-script/events.md)和[原版调用路径](../research/2026-11-22-hp-lost.md)。
+
+`AcceptedHurt` 在原版接受本地玩家伤害后沿同一游戏连接通知客户端；`PlayerHealth` 从当前玩家的普通生命值字段和初始同步建立基线。显式截图沿用停止帧确认；已读回的像素在后台编码，一份 PNG 同时用于文件和 MCP。图像写盘错误通过工具结果返回。

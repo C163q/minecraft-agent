@@ -1,5 +1,6 @@
 package mcagent;
 
+import java.nio.file.Path;
 import com.google.gson.JsonObject;
 import java.util.*;
 import java.util.function.BooleanSupplier;
@@ -26,7 +27,7 @@ final class InputQueue {
     private record Run(int line, String source, long ticks, Set<String> legacyHeld,
                        Map<String,String> keys, MouseDispatch.Actions mouse,
                        boolean waitMouse, boolean clear, boolean pause, String event, List<Run> body,
-                       boolean clearListeners, java.nio.file.Path screenshot) {
+                       boolean clearListeners, Path screenshot) {
         static Run read(JsonObject json, Set<String> knownKeys, boolean incremental, boolean inHandler) {
             int line = json.get("line").getAsInt();
             if (line < 1) throw new IllegalArgumentException("invalid source line");
@@ -44,7 +45,7 @@ final class InputQueue {
                     controls++;
                 }
                 boolean clearListeners = flag(json, "clear_listeners");
-                var screenshot = json.has("screenshot") ? java.nio.file.Path.of(json.get("screenshot").getAsString()) : null;
+                var screenshot = json.has("screenshot") ? Path.of(json.get("screenshot").getAsString()) : null;
                 if (screenshot != null && !screenshot.isAbsolute())
                     throw new IllegalArgumentException("expected absolute screenshot path");
                 if (clearListeners) controls++;
@@ -127,7 +128,7 @@ final class InputQueue {
     private final List<Listener> listeners = new ArrayList<>();
     private final List<Listener> pending = new ArrayList<>();
     private List<Origin> pauseListeners = List.of();
-    private final List<java.nio.file.Path> screenshots = new ArrayList<>();
+    private final List<Path> screenshots = new ArrayList<>();
 
     void observe(String event) {
         for (var listener : listeners) {
@@ -161,7 +162,7 @@ final class InputQueue {
 
     List<Origin> pauseListeners() { return pauseListeners; }
 
-    List<java.nio.file.Path> takeScreenshots() {
+    List<Path> takeScreenshots() {
         var paths = List.copyOf(screenshots);
         screenshots.clear();
         return paths;

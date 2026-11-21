@@ -21,6 +21,7 @@ END
     "buttons": {"left": "temporary"}
   },
   "moves": [],
+  "listeners": [],
   "max_speed_px_per_tick": 50,
   "queue": {"total": 0, "entries": [], "next_cursor": null}
 }
@@ -45,3 +46,7 @@ END
 | `{"queue":"file","path":".tmp/pending.json"}` | 将含全部段的 JSON 快照原子写入 MCP 主机上的新文件，工具结果返回状态摘要、进行中的移动项数（`move_count`）、待执行段数和文件绝对路径 |
 
 文件相对路径以 MCP 工作目录为基准，使用已存在的父目录和新的文件名。游标属于当前 MCP 进程，保留最近 8 个需要翻页的快照；旧游标失效时可重新从第一页查询。导出的等待指令采用标准写法（例如 `Wait(0005)` 记为 `Wait(5)`），已经开始的长等待以 `remaining_ticks` 表示尚未执行的长度。`pause_reason` 描述停在什么位置，在正常运行时为 null。
+
+## 事件来源
+
+支持事件的 Mod 返回 `listeners`，每项包含 `event`、所属顶层 `block`、声明的 `line` 和 `state`。状态 `ready` 表示可响应事件，`handling` 表示正在执行上一次处理块。来自事件的队列段带 `listener` 对象，其中的块和行号指向原声明。清除监听后，仍待执行的段保留这个来源。预览、分页快照和完整导出沿用同一格式。详见[受伤事件](events.md)。

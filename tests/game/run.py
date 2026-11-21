@@ -110,6 +110,7 @@ def exercise(client, work, log, codex_env):
     if codex_env is not None:
         from codex_mouse import exercise_codex
         play(block("Mouse(left) PAUSE", "Wait(1)"), 1, "before-codex")
+        (work / "test-hit").write_text("client-drop")
         exercise_codex(work, codex_env, root / "target/debug/minecraft-mcp")
         (work / "reset-view").touch()
         deadline = time.monotonic() + 4
@@ -122,7 +123,7 @@ def exercise(client, work, log, codex_env):
 
     play(block("Mouse(left)"), 1, "temporary-left")
     expected = {"world": "paused", "held": {"keys": {}, "buttons": {"left": "temporary"}},
-                "moves": [], "max_speed_px_per_tick": 50, "pause_reason": "end",
+                "moves": [], "max_speed_px_per_tick": 50, "pause_reason": "end", "listeners": [],
                 "queue": {"total": 0, "entries": [], "next_cursor": None}}
     assert inspect() == expected
     bad = rpc("tools/call", {"name": "inspect_input", "arguments": {"advance": True}})
@@ -211,6 +212,8 @@ def exercise(client, work, log, codex_env):
     samples, events = trace(offset)
     assert samples[-1] == "000" and events == ["26 1", "26 0"], (samples, events)
     assert not has_pause_icon(work / "resumed.png"), "pause indicator persisted after resuming"
+    from events import exercise_events
+    exercise_events(work, log, play, rpc, block, inspect)
     print("PASS: eight ticks, handoff, remapping, invalid input, native pause, catch-up ticks, cancellation and END images.")
 
 

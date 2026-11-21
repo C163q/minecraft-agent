@@ -336,6 +336,22 @@ mod tests {
     }
 
     #[test]
+    fn events_require_game_support_and_keep_the_handlers_source_lines() {
+        let script =
+            Script::parse("BEGIN\nON(Hurt)\nBEGIN\nKeyRelease(w) PAUSE\nEND\nEND").unwrap();
+        let old = json!({"pause_queue":true,"mouse_input":true});
+        assert!(encode_program(script.compile(BTreeSet::new()), &old, 50.).is_err());
+        let updated = json!({"input_events":true,"pause_queue":true,"mouse_input":true});
+        let wire = encode_program(script.compile(BTreeSet::new()), &updated, 50.).unwrap();
+        assert_eq!(wire["keys"]["w"], 4);
+        let listener = &wire["runs"][0];
+        assert_eq!(listener["event"], "Hurt");
+        assert_eq!(listener["line"], 2);
+        assert_eq!(listener["body"][0]["key_actions"]["w"], "release");
+        assert_eq!(listener["body"][1]["pause"], true);
+    }
+
+    #[test]
     fn pause_wire_keeps_declarations_and_split_source_fragments() {
         let script = Script::parse("BEGIN\nWait(17293822569102704640) KeyPress(w) KeyRelease(a) Key(d) Mouse(left) PAUSE // stop\nEND").unwrap();
         let old = json!({"mouse_input":true});

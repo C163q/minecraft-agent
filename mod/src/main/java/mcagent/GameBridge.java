@@ -1,7 +1,6 @@
 package mcagent;
 
 import com.google.gson.*;
-import java.awt.image.BufferedImage;
 import java.io.*;
 import java.net.*;
 import java.nio.ByteBuffer;
@@ -10,7 +9,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.Base64;
 import java.util.concurrent.*;
-import javax.imageio.ImageIO;
 import net.fabricmc.api.ClientModInitializer;
 import net.minecraft.client.Minecraft;
 import org.slf4j.LoggerFactory;
@@ -80,6 +78,7 @@ public final class GameBridge implements ClientModInitializer {
             hello.addProperty("mouse_input", true);
             hello.addProperty("inspect_input", true);
             hello.addProperty("pause_queue", true);
+            hello.addProperty("input_events", true);
             hello.add("persistent", JSON.toJsonTree(snapshot.persistent()));
             send(peer, hello);
             var program = readProgram(peer);
@@ -106,7 +105,6 @@ public final class GameBridge implements ClientModInitializer {
                         if (peer.read(probe) != 0) throw new EOFException("client disconnected or sent a second submission");
                     } catch (IOException error) {
                         mc.submit(() -> engine.cancel(mc, result)).join();
-                        result.thenAccept(Playback.Observation::close);
                         throw error;
                     }
                 }
@@ -115,15 +113,10 @@ public final class GameBridge implements ClientModInitializer {
             reply.addProperty("world", frame.world());
             reply.addProperty("ticks", frame.ticks());
             reply.addProperty("pause_reason", frame.pauseReason());
-            try (var image = frame.image()) {
-                if (image != null) {
-                    reply.add("camera", JSON.toJsonTree(frame.camera()));
-                    var rgb = new BufferedImage(image.getWidth(), image.getHeight(), BufferedImage.TYPE_INT_RGB);
-                    rgb.setRGB(0, 0, image.getWidth(), image.getHeight(), image.getPixels(), 0, image.getWidth());
-                    var png = new ByteArrayOutputStream();
-                    ImageIO.write(rgb, "PNG", png);
-                    reply.addProperty("png", Base64.getEncoder().encodeToString(png.toByteArray()));
-                }
+            if (!frame.listeners().isEmpty()) reply.add("pause_listeners", JSON.toJsonTree(frame.listeners()));
+            if (frame.png() != null) {
+                reply.add("camera", JSON.toJsonTree(frame.camera()));
+                reply.addProperty("png", Base64.getEncoder().encodeToString(frame.png()));
             }
             send(peer, reply);
         } catch (Exception e) {
