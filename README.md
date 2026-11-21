@@ -6,4 +6,4 @@
 
 1. 按[构建、安装与连接](docs/development/keyboard-bridge.md)准备 Minecraft 26.3、Fabric Loader 0.20.1、Mod 和 MCP 程序。
 2. 在启动器中进入单人世界，使用支持 stdio MCP 和图像结果的客户端调用 `input_script`。仅查看当前停止帧时可传入 `{"script":"BEGIN\nEND"}`。
-3. 编写输入脚本或在截图上标点时按需查阅[脚本语法参考](docs/input-script/README.md)。暂停和恢复后的输入合并见[暂停与继续](docs/input-script/pause.md)。用受伤或掉血触发操作见[事件监听](docs/input-script/events.md)。其余开发与实测资料见[文档入口](docs/README.md)。
+3. 编写输入脚本或在截图上标点时按需查阅[脚本语法参考](docs/input-script/README.md)。暂停和恢复后的输入合并见[暂停与继续](docs/input-script/pause.md)。用受伤、掉血、死亡或撞墙触发操作见[事件监听](docs/input-script/events.md)。其余开发与实测资料见[文档入口](docs/README.md)。

@@ -68,6 +68,17 @@ fn check_game_support(program: &DispatchProgram, hello: &Value) -> Result<()> {
     {
         return Err("input events and explicit screenshots require an updated Fabric mod".into());
     }
+    for (event, _) in program.runs.iter().filter_map(|run| run.handler.as_ref()) {
+        let supported = match hello.get("event_names") {
+            Some(names) => names
+                .as_array()
+                .is_some_and(|names| names.iter().any(|name| name.as_str() == Some(event))),
+            None => matches!(event.as_str(), "Hurt" | "HpLost"),
+        };
+        if !supported {
+            return Err(format!("installed Fabric mod does not support ON({event}); update the mod and restart Minecraft").into());
+        }
+    }
     let needs_mouse = program
         .runs
         .iter()
@@ -333,6 +344,18 @@ mod tests {
             );
         }
         assert!(stop_result(&status, true).is_err());
+    }
+
+    #[test]
+    fn extended_events_require_an_advertised_name() {
+        let script = Script::parse("BEGIN\nON(Death)\nBEGIN\nPAUSE\nEND\nEND").unwrap();
+        let program = script.compile(Default::default());
+        let mut hello = json!({"input_events":true});
+        assert!(check_game_support(&program, &hello).is_err());
+        hello["event_names"] = json!(["CollideX", "CollideZ"]);
+        assert!(check_game_support(&program, &hello).is_err());
+        hello["event_names"] = json!(["Death"]);
+        assert!(check_game_support(&program, &hello).is_ok());
     }
 
     #[test]

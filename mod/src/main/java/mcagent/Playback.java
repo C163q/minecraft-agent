@@ -12,7 +12,10 @@ import java.util.concurrent.atomic.AtomicReference;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Screenshot;
 import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.server.IntegratedServer;
+import net.minecraft.util.Mth;
+import net.minecraft.world.phys.Vec3;
 import net.minecraft.network.protocol.common.ClientboundPingPacket;
 import net.minecraft.network.protocol.game.ClientboundSetHealthPacket;
 
@@ -26,6 +29,11 @@ public final class Playback {
     private final InputQueue queue = new InputQueue();
     private final Map<String,Integer> codes = new HashMap<>();
     private ClientLevel level;
+    private static final int CONTACT_X = 1, CONTACT_Z = 2;
+    private LocalPlayer contactPlayer;
+    private int previousContacts, currentContacts;
+    private boolean simulatingPlayer;
+
     private double maxSpeed = DEFAULT_MAX_SPEED;
 
     // A request waits for its stopped frame. Manual playback has no requesting peer.
@@ -130,6 +138,7 @@ public final class Playback {
         if (mc.level != level || ((running || pauseReason != null || active != null) && !supports(mc))) {
             reset(mc, "world changed during input session");
             level = mc.level;
+            contactPlayer = null;
         } else if (endInNativeMenu && !mc.gui.isPausing()) {
             endInNativeMenu = false;
             if (!freeze) resume(mc);
@@ -187,11 +196,29 @@ public final class Playback {
         if (mc.level != null && mc.level == level && supports(mc)) queue.observe(event);
     }
 
+    public void collision(Minecraft mc, LocalPlayer player, Vec3 requested, Vec3 allowed) {
+        if (!simulatingPlayer || player != contactPlayer || player != mc.player) return;
+        int blocked = 0;
+        if (!Mth.equal(requested.x, allowed.x)) blocked |= CONTACT_X;
+        if (!Mth.equal(requested.z, allowed.z)) blocked |= CONTACT_Z;
+        // Several move calls can contribute to one simulation tick.
+        int entered = blocked & ~(previousContacts | currentContacts);
+        currentContacts |= blocked;
+        if ((entered & CONTACT_X) != 0) observe(mc, "CollideX");
+        if ((entered & CONTACT_Z) != 0) observe(mc, "CollideZ");
+    }
+
     public boolean beforeTick(Minecraft mc) {
         checkContext(mc);
         if (running && queue.hasObserved()) resolveControls(mc);
         if (freeze && !mc.isPaused()) return false; // Suppress catch-up ticks in the stopping frame.
         if (mc.isPaused() && !mc.gui.isPausing()) return true;
+        simulatingPlayer = !mc.isPaused() && mc.player != null;
+        if (simulatingPlayer) {
+            previousContacts = contactPlayer == mc.player ? currentContacts : 0;
+            currentContacts = 0;
+            contactPlayer = mc.player;
+        }
         inTick = true;
         if (!running || (queue.isEmpty() && keys.isEmpty() && !mouse.active())) return true;
         var input = queue.input();
@@ -208,6 +235,7 @@ public final class Playback {
     }
 
     public void afterTick(Minecraft mc) {
+        simulatingPlayer = false;
         if (!inTick) return;
         inTick = false;
         if (appliedInput) {

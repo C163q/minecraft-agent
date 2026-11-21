@@ -67,6 +67,8 @@ PAUSE 和跨块覆盖需要同时更新 MCP 与 Mod。旧 MCP 发送每拍的目
 
 ## 事件与显式截图
 
-事件脚本要求握手能力 `input_events`。MCP 校验处理块的键名，传入声明的源行、事件名和处理体。`InputQueue` 在客户端观察到事件时确定监听资格，在输入边界按注册顺序激活处理块。见[用户语法](../input-script/events.md)和[原版调用路径](../research/2026-11-22-hp-lost.md)。
+事件脚本要求握手能力 `input_events`。Mod 用 `event_names` 列出支持的事件名；只声明旧能力的 Mod 可使用 Hurt 和 HpLost。MCP 校验处理块的键名，传入声明的源行、事件名和处理体。`InputQueue` 在客户端观察到事件时确定监听资格，在输入边界按注册顺序激活处理块。见[用户语法](../input-script/events.md)和[原版调用路径](../research/2026-11-22-hp-lost.md)。
 
 `AcceptedHurt` 在原版接受本地玩家伤害后沿同一游戏连接通知客户端；`PlayerHealth` 从当前玩家的普通生命值字段和初始同步建立基线。显式截图沿用停止帧确认；已读回的像素在后台编码，一份 PNG 同时用于文件和 MCP。图像写盘错误通过工具结果返回。
+
+死亡通知由 `PlayerDeath` 在原版选择死亡界面或立即重生之前观察。`PlayerCollision` 取本地玩家碰撞求解的输入、输出向量，沿用原版容差比较世界 X、Z 分量。`Playback` 按实际模拟拍保留接触状态，分别检测每轴开始受阻的边沿。

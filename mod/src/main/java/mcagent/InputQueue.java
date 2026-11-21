@@ -7,6 +7,7 @@ import java.util.function.BooleanSupplier;
 
 /** A block advances one fixed tick at a time alongside every other retained block. */
 final class InputQueue {
+    static final List<String> EVENT_NAMES = List.of("Hurt", "HpLost", "Death", "CollideX", "CollideZ");
     record Origin(String event, long block, int line) {}
     record ListenerState(String event, long block, int line, String state) {}
     record Entry(long block, int line, String source, String remaining_ticks, Origin listener) {}
@@ -38,7 +39,7 @@ final class InputQueue {
                 String event = json.has("event") ? json.get("event").getAsString() : null;
                 var body = new ArrayList<Run>();
                 if (event != null) {
-                    if (inHandler || !Set.of("Hurt", "HpLost").contains(event))
+                    if (inHandler || !EVENT_NAMES.contains(event))
                         throw new IllegalArgumentException("invalid listener declaration");
                     for (var row : json.getAsJsonArray("body"))
                         body.add(read(row.getAsJsonObject(), knownKeys, incremental, true));

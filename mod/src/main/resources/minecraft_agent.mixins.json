@@ -1,5 +1,5 @@
 {
   "required": true, "package": "mcagent.mixin", "compatibilityLevel": "JAVA_25",
-  "client": ["Bindings", "ClientAssets", "ClientLoop", "Pause", "ServerTick", "Marker", "AcceptedHurt", "HealthField", "PlayerHealth", "PhysicalKeys", "WorldProjection"],
+  "client": ["Bindings", "ClientAssets", "ClientLoop", "Pause", "ServerTick", "Marker", "AcceptedHurt", "HealthField", "PlayerHealth", "PlayerCollision", "PlayerDeath", "PhysicalKeys", "WorldProjection"],
   "injectors": { "defaultRequire": 1 }
 }

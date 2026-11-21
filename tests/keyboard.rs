@@ -218,3 +218,16 @@ fn explicit_screenshot_is_zero_ticks_and_accepts_quoted_paths() {
     assert_eq!(Keyboard::default().play(&script).count(), 0);
     assert!(Script::parse("BEGIN\nPAUSE ScreenShot(\"hit.png\")\nEND").is_err());
 }
+
+#[test]
+fn player_death_and_axis_collisions_compile_as_distinct_listeners() {
+    for name in ["Death", "CollideX", "CollideZ"] {
+        let script = Script::parse(&format!(
+            "BEGIN\nON({name})\nBEGIN\nPAUSE\nEND\nWait(4)\nEND"
+        ))
+        .unwrap();
+        let program = script.compile(Default::default());
+        assert_eq!(program.runs[0].handler.as_ref().unwrap().0, name);
+        assert_eq!(program.runs[0].ticks, 0);
+    }
+}

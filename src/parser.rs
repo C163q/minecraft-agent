@@ -310,10 +310,12 @@ impl Script {
                 (Scope::Inside, "END") => scope = Scope::After,
                 (Scope::Inside, body) if body.starts_with("ON(") => {
                     let (_, name, rest) = next_command(body).map_err(error)?;
-                    if !rest.is_empty() || !matches!(name, "Hurt" | "HpLost") {
-                        return Err(error(
-                            "expected ON(Hurt) or ON(HpLost) on its own line".into(),
-                        ));
+                    if !rest.is_empty()
+                        || !matches!(name, "Hurt" | "HpLost" | "Death" | "CollideX" | "CollideZ")
+                    {
+                        return Err(error(format!(
+                            "invalid ON declaration {body:?}: expected one supported event on its own line"
+                        )));
                     }
                     pending = Some((line, name.to_owned()));
                 }
