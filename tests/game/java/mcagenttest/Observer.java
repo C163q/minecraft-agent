@@ -45,11 +45,46 @@ public final class Observer implements ClientModInitializer {
         }
     }
 
+    private void mouseInput(Minecraft mc, String[] command) throws Exception {
+        if (command[0].equals("motion")) {
+            float dx = Float.parseFloat(command[1]), dy = Float.parseFloat(command[2]);
+            long start = mc.submit(() -> {
+                try (var event = SDL_Event.calloc()) {
+                    event.motion().type(SDL_EVENT_MOUSE_MOTION)
+                        .windowID(SDLVideo.SDL_GetWindowID(mc.getWindow().handle()))
+                        .x((float)mc.mouseHandler.xpos() + dx).y((float)mc.mouseHandler.ypos() + dy)
+                        .xrel(dx).yrel(dy);
+                    if (!SDL_PushEvent(event)) throw new IllegalStateException("SDL rejected test motion");
+                }
+                if (command.length == 4 && command[3].equals("resume")) {
+                    int key = InputConstants.getKey("key.keyboard.f8").getValue();
+                    pushKey(mc, key, true, false);
+                    pushKey(mc, key, false, false);
+                }
+                return frame;
+            }).join();
+            await(() -> mc.submit(() -> frame >= start + 3).join(), 3);
+        }
+        Files.writeString(Path.of("mouse-state"), mc.submit(() ->
+            mc.player.getYRot() + " " + mc.player.getXRot() + " " +
+            mc.mouseHandler.xpos() + " " + mc.mouseHandler.ypos()).join());
+    }
+
     private void observerInput(Minecraft mc) {
         var request = Path.of("observer-input");
         if (!Files.exists(request)) return;
         try {
             var command = Files.readString(request).strip().split(" ");
+            if (command[0].equals("motion") || command[0].equals("view")) {
+                mouseInput(mc, command);
+                Files.delete(request);
+                return;
+            }
+            if (command[0].equals("cinematic")) {
+                mc.submit(() -> { mc.options.smoothCamera = Boolean.parseBoolean(command[1]); }).join();
+                Files.delete(request);
+                return;
+            }
             var key = InputConstants.getKey("key.keyboard." + command[1]);
             var controls = mc.submit(() -> {
                 if (command[0].equals("bind")) {

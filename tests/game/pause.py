@@ -6,6 +6,30 @@ import time
 from pause_binding import assert_saved_pause_key, observer_input
 
 
+def mouse_state(work, command):
+    observer_input(work, command)
+    return tuple(map(float, (work / "mouse-state").read_text().split()))
+
+
+def exercise_paused_view(work, play, block):
+    def view(command):
+        return mouse_state(work, command)[:2]
+
+    stopped = view("view")
+    view("motion 20 10")  # Vanilla may discard the first motion after grabbing the mouse.
+    assert view("motion 80 40") == stopped, "physical mouse turned the paused camera"
+    assert view("motion 80 40 resume") == stopped, "paused motion leaked across the F8 resume edge"
+    yaw, pitch = view("motion 80 40")
+    assert yaw > stopped[0] + 1 and pitch > stopped[1] + 1, "running camera ignored physical motion"
+    observer_input(work, "cinematic true")
+    play(block("MouseMove(Px(25), Px(15)) PAUSE"), 1, "cinematic-stop")
+    stopped = view("view")
+    assert view("motion 80 40") == stopped, "cinematic camera drifted during PAUSE"
+    play(block("Wait(3)"), 3, "cinematic-resumed")
+    assert view("view") == stopped, "cinematic camera replayed motion on resume"
+    observer_input(work, "cinematic false")
+
+
 def exercise_pause(work, log, play, rpc, block, submit, receive):
     def inspect(**args):
         reply = rpc("tools/call", {"name": "inspect_input", "arguments": args})
@@ -31,6 +55,7 @@ def exercise_pause(work, log, play, rpc, block, submit, receive):
             time.sleep(.05)
         raise AssertionError((reason, state))
 
+    exercise_paused_view(work, play, block)
     stopped(["Key(a) Key(w)", "Key(s) PAUSE", "Key(d)", "Key(q)"], 2, "pause-mid", "pause")
     state = inspect()
     assert state["held"]["keys"] == {"s": "temporary"} and rows(state) == ["Key(d)", "Key(q)"], state
@@ -127,6 +152,8 @@ def exercise_pause(work, log, play, rpc, block, submit, receive):
     wait_state("end")
 
     stopped(["Key(e)", "Key(f9)", "Wait(1)"], 2, "pause-inventory", "hotkey")
+    yaw, pitch, x, y = mouse_state(work, "view")
+    assert mouse_state(work, "motion 8 4") == (yaw, pitch, x + 8, y + 4)
     observer_input(work, "press f9")
     observer_input(work, "release f9")
     wait_state("end")
