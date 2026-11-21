@@ -27,3 +27,5 @@ javap -p -c -classpath "$MC_JAR" net.minecraft.client.server.IntegratedServer
 在世界内同步生命值可让红心随新帧更新。实体移动还可能有等待后续客户端 tick 推进的位置插值，停止图中会保留玩家当时所见的位置。实测范围见[红心与实体停止帧](../research/2026-11-21-world-stop-frame.md)。
 
 通过 stdio 接入 Codex 时，最终截图可直接作为 MCP 工具结果的 `image` 内容块与暂停状态一同返回。模型可直接观察该图，详情见 [Codex 单图实机盲测](../research/2026-11-21-codex-image.md)。
+
+GUI 点选使用原始截图的像素坐标。输入端根据实际窗口逻辑尺寸换算鼠标位置，再由 Minecraft 按当前 GUI 缩放处理命中。标点副本与原图保持相同尺寸。已测范围见[两种 GUI 缩放下的箱子点选](../research/2026-11-21-codex-gui-click.md)。
