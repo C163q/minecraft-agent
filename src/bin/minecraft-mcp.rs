@@ -60,6 +60,14 @@ fn max_mouse_speed() -> Result<f64> {
 }
 
 fn check_game_support(program: &DispatchProgram, hello: &Value) -> Result<()> {
+    if program
+        .runs
+        .iter()
+        .any(|r| r.handler.is_some() || r.clear_listeners || r.screenshot.is_some())
+        && hello["input_events"] != true
+    {
+        return Err("input events and explicit screenshots require an updated Fabric mod".into());
+    }
     let needs_mouse = program
         .runs
         .iter()
@@ -112,16 +120,9 @@ fn inspect_game(call: &Mutex<Call>) -> Result<Value> {
     Ok(state)
 }
 
-fn encode_program(program: DispatchProgram, hello: &Value, max_speed: f64) -> Result<Value> {
-    check_game_support(&program, hello)?;
-    let queue_supported = hello["pause_queue"] == true;
-    if !queue_supported && program.runs.iter().any(|r| r.pause) {
-        return Err("PAUSE requires the pause_queue Fabric mod update; update the mod and restart Minecraft".into());
-    }
-    let runs: Vec<_> = program
-        .runs
-        .into_iter()
-        .map(|r| {
+fn encode_runs(runs: Vec<minecraft_input::KeyRun>, queue_supported: bool) -> Result<Vec<Value>> {
+    runs.into_iter()
+        .map(|r| -> Result<Value> {
             let mut run = json!({
                 "line":r.line, "ticks":r.ticks.to_string(), "held":r.held,
                 "moves":r.moves, "buttons":r.buttons, "wait_mouse":r.wait_mouse, "clear":r.clear
@@ -131,9 +132,28 @@ fn encode_program(program: DispatchProgram, hello: &Value, max_speed: f64) -> Re
                 run["source"] = json!(r.source);
                 run["pause"] = json!(r.pause);
             }
-            run
+            if let Some((event, body)) = r.handler {
+                run["event"] = json!(event);
+                run["body"] = json!(encode_runs(body, queue_supported)?);
+            }
+            if r.clear_listeners {
+                run["clear_listeners"] = json!(true);
+            }
+            if let Some(path) = r.screenshot {
+                run["screenshot"] = json!(std::path::absolute(path)?);
+            }
+            Ok(run)
         })
-        .collect();
+        .collect()
+}
+
+fn encode_program(program: DispatchProgram, hello: &Value, max_speed: f64) -> Result<Value> {
+    check_game_support(&program, hello)?;
+    let queue_supported = hello["pause_queue"] == true;
+    if !queue_supported && program.runs.iter().any(|r| r.pause) {
+        return Err("PAUSE requires the pause_queue Fabric mod update; update the mod and restart Minecraft".into());
+    }
+    let runs = encode_runs(program.runs, queue_supported)?;
     let mut request = json!({"keys":program.keys,"runs":runs,"persistent":program.persistent,"max_speed":max_speed});
     if queue_supported {
         request["queue_version"] = json!(1);
@@ -184,6 +204,9 @@ fn stop_result(reply: &Value, include_screenshot: bool) -> Result<Value> {
     let mut status = json!({"ticks":ticks, "world":world});
     if let Some(reason) = reply.get("pause_reason") {
         status["pause_reason"] = reason.clone();
+    }
+    if let Some(origins) = reply.get("pause_listeners") {
+        status["pause_listeners"] = origins.clone();
     }
     if !include_screenshot {
         return Ok(json!({"content":[{"type":"text","text":status.to_string()}]}));

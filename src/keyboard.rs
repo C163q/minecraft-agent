@@ -70,6 +70,9 @@ pub struct KeyRun {
     pub key_actions: BTreeMap<String, &'static str>,
     pub source: String,
     pub pause: bool,
+    pub handler: Option<(String, Vec<KeyRun>)>,
+    pub screenshot: Option<String>,
+    pub clear_listeners: bool,
     pub moves: Vec<serde_json::Value>,
     pub buttons: BTreeMap<String, &'static str>,
     pub wait_mouse: bool,
@@ -111,6 +114,31 @@ impl Script {
         for row in &self.rows {
             for key in row.keys.keys() {
                 keys.entry(key.clone()).or_insert(row.line);
+            }
+            if let Some((event, body)) = &row.handler {
+                let program = body.compile(BTreeSet::new());
+                for (key, line) in program.keys {
+                    keys.entry(key).or_insert(line);
+                }
+                runs.push(KeyRun {
+                    line: row.line,
+                    source: format!("ON({event})"),
+                    handler: Some((event.clone(), program.runs)),
+                    ..Default::default()
+                });
+            }
+            if row.clear_listeners || row.screenshot.is_some() {
+                runs.push(KeyRun {
+                    line: row.line,
+                    source: if row.clear_listeners {
+                        "CLEAR_LISTENERS".into()
+                    } else {
+                        row.input_source.clone()
+                    },
+                    clear_listeners: row.clear_listeners,
+                    screenshot: row.screenshot.clone(),
+                    ..Default::default()
+                });
             }
             if row.wait > 0 || row.wait_mouse || row.clear {
                 runs.push(KeyRun {

@@ -138,6 +138,9 @@ pub(crate) struct Row {
     pub wait_mouse: bool,
     pub clear: bool,
     pub pause: bool,
+    pub handler: Option<(String, Script)>,
+    pub clear_listeners: bool,
+    pub screenshot: Option<String>,
     pub input_source: String,
 }
 
@@ -152,6 +155,31 @@ impl Row {
             wait: u64::from(code.is_empty()),
             ..Self::default()
         };
+        if code == "CLEAR_LISTENERS" {
+            row.clear_listeners = true;
+            return Ok(row);
+        }
+        if let Some(args) = code.strip_prefix("ScreenShot(") {
+            let mut strings =
+                serde_json::Deserializer::from_str(args.trim_start()).into_iter::<String>();
+            let path = strings
+                .next()
+                .and_then(Result::ok)
+                .filter(|p| !p.is_empty() && !p.contains('\0'))
+                .ok_or("ScreenShot expects a quoted file path")?;
+            let rest = args.trim_start()[strings.byte_offset()..]
+                .trim_start()
+                .strip_prefix(')')
+                .ok_or("expected ')' after screenshot path")?;
+            let suffix = rest.split_once("//").map_or(rest, |(code, _)| code);
+            row.pause = !suffix.trim().is_empty();
+            if row.pause && !(suffix.starts_with(char::is_whitespace) && suffix.trim() == "PAUSE") {
+                return Err("ScreenShot may only be followed by PAUSE".into());
+            }
+            row.input_source = format!("ScreenShot({})", serde_json::to_string(&path).unwrap());
+            row.screenshot = Some(path);
+            return Ok(row);
+        }
         if code == "CLEAR" {
             row.clear = true;
             return Ok(row);
@@ -235,6 +263,8 @@ impl Script {
         }
         let mut scope = Scope::Before;
         let mut rows = Vec::new();
+        let mut pending: Option<(usize, String)> = None;
+        let mut handler: Option<(usize, String, Vec<Row>)> = None;
         let mut eof = 1;
         for (index, raw) in text.lines().enumerate() {
             let line = index + 1;
@@ -242,15 +272,52 @@ impl Script {
             if raw.trim_start().starts_with("//") {
                 continue;
             }
-            let code = raw
-                .split_once("//")
-                .map_or(raw, |(prefix, _)| prefix)
-                .trim();
+            let code = if raw.trim_start().starts_with("ScreenShot(") {
+                raw.trim()
+            } else {
+                raw.split_once("//")
+                    .map_or(raw, |(prefix, _)| prefix)
+                    .trim()
+            };
+            let error = |message: String| ParseError { line, message };
+            if let Some((decl, event)) = pending.take() {
+                if code != "BEGIN" {
+                    return Err(error("expected BEGIN after ON declaration".into()));
+                }
+                handler = Some((decl, event, Vec::new()));
+                continue;
+            }
+            if let Some((_, _, body)) = &mut handler {
+                if code == "END" {
+                    let (decl, event, rows_in_handler) = handler.take().unwrap();
+                    rows.push(Row {
+                        line: decl,
+                        handler: Some((
+                            event,
+                            Script {
+                                rows: rows_in_handler,
+                            },
+                        )),
+                        ..Default::default()
+                    });
+                } else {
+                    body.push(Row::parse(line, code).map_err(error)?);
+                }
+                continue;
+            }
             match (&scope, code) {
                 (Scope::Before, "BEGIN") => scope = Scope::Inside,
                 (Scope::Inside, "END") => scope = Scope::After,
-                (Scope::Inside, body) => rows
-                    .push(Row::parse(line, body).map_err(|message| ParseError { line, message })?),
+                (Scope::Inside, body) if body.starts_with("ON(") => {
+                    let (_, name, rest) = next_command(body).map_err(error)?;
+                    if !rest.is_empty() || !matches!(name, "Hurt" | "HpLost") {
+                        return Err(error(
+                            "expected ON(Hurt) or ON(HpLost) on its own line".into(),
+                        ));
+                    }
+                    pending = Some((line, name.to_owned()));
+                }
+                (Scope::Inside, body) => rows.push(Row::parse(line, body).map_err(error)?),
                 (_, "") => (),
                 (Scope::Before, _) => {
                     return Err(ParseError {

@@ -184,3 +184,37 @@ fn pause_must_end_its_line_and_clear_stands_alone() {
         );
     }
 }
+
+#[test]
+fn listener_registration_skips_body_and_preserves_key_lines() {
+    let text = "BEGIN\nCLEAR_LISTENERS\nON(Hurt)\nBEGIN\nKeyRelease(s) PAUSE\nEND\nKey(w)\nEND";
+    let file = std::env::temp_dir().join(format!(
+        "minecraft-event-script-{}.input",
+        std::process::id()
+    ));
+    std::fs::write(&file, text).unwrap();
+    let script = ScriptSource::Path(&file).load(Path::new(".")).unwrap();
+    std::fs::remove_file(file).unwrap();
+    assert_eq!(Keyboard::default().play(&script).count(), 1);
+    assert_eq!(script.compile(Default::default()).keys["s"], 5);
+    for (bad, line) in [
+        ("ON(Miss)\nBEGIN\nEND", 2),
+        ("ON(Hurt)\nKey(a)", 3),
+        ("ON(Hurt)\nBEGIN\nKeyPress(w) KeyRelease(w)\nEND", 4),
+    ] {
+        assert_eq!(
+            Script::parse(&format!("BEGIN\n{bad}\nEND"))
+                .unwrap_err()
+                .line,
+            line
+        );
+    }
+}
+
+#[test]
+fn explicit_screenshot_is_zero_ticks_and_accepts_quoted_paths() {
+    let script =
+        Script::parse("BEGIN\nScreenShot(\"dir//hit (1).png\") PAUSE // stop\nEND").unwrap();
+    assert_eq!(Keyboard::default().play(&script).count(), 0);
+    assert!(Script::parse("BEGIN\nPAUSE ScreenShot(\"hit.png\")\nEND").is_err());
+}
