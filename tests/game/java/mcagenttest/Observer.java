@@ -13,7 +13,7 @@ import net.minecraft.world.level.levelgen.WorldOptions;
 import net.minecraft.world.level.levelgen.presets.WorldPresets;
 
 public final class Observer implements ClientModInitializer {
-    public static volatile boolean recording, slow;
+    public static volatile boolean recording, slow, measureWorld;
     public static long frame;
 
     private void await(BooleanSupplier condition) throws Exception {
@@ -70,6 +70,7 @@ public final class Observer implements ClientModInitializer {
                         try { Files.createFile(Path.of("view-reset")); }
                         catch (java.io.IOException error) { throw new java.io.UncheckedIOException(error); }
                     }
+                    measureWorld = Files.exists(Path.of("measure-world"));
                     slow = Files.exists(Path.of("slow"));
                     return Files.exists(Path.of("done"));
                 }, 450);

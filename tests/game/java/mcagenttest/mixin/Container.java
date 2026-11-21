@@ -18,7 +18,9 @@ abstract class Container {
     @Inject(method="tickServer", at=@At("RETURN"))
     private void checkItem(BooleanSupplier budget, CallbackInfo ci) {
         if (!Observer.recording) return;
-        var players = ((IntegratedServer)(Object)this).getPlayerList().getPlayers();
+        var server = (IntegratedServer)(Object)this;
+        if (Observer.measureWorld) System.out.printf("AGENT_WORLD %b %d%n", server.isPaused(), server.overworld().getGameTime());
+        var players = server.getPlayerList().getPlayers();
         if (players.isEmpty()) return;
         var menu = players.getFirst().containerMenu;
         if (menu instanceof ChestMenu && !inChest) System.out.println("AGENT_OPEN chest");

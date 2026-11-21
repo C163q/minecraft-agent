@@ -49,6 +49,8 @@ MINECRAFT_AGENT_SOCKET = "/run/user/1000/minecraft-agent.sock"
 
 鼠标的逐拍合成由 [Movement](../../mod/src/main/java/mcagent/Movement.java) 处理，[MouseDispatch](../../mod/src/main/java/mcagent/MouseDispatch.java) 在指令生效时换算单位并调用原版鼠标事件。游戏端在停止帧渲染时采集相机信息，Rust MCP 将其与原始 PNG 一起保存，供 [cursor_hint](../input-script/cursor-hint.md) 使用。GUI 和外部 PNG 也可标点。
 
+`inspect_input` 在游戏线程一次性复制键和按钮的实际脚本保持状态、活动位移与限速。它通过独立的只读请求读取 Mod 状态，和脚本提交共用实例的串行连接。MCP 返回相同的 JSON 文本及 `structuredContent`。较旧的 Mod 缺少查询能力时，MCP 会提示更新。字段和使用示例见[查询当前输入状态](../input-script/inspect.md)。
+
 ## 开发验证
 
 从项目根目录运行 `cargo test --offline` 和 `cargo clippy --offline --all-targets -- -D warnings`。首次获取依赖需先执行常规 Cargo 构建。图形验证需要 Python Pillow、已安装的游戏资源、可用的图形桌面和本地套接字权限：

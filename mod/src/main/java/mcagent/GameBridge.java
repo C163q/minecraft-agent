@@ -78,9 +78,16 @@ public final class GameBridge implements ClientModInitializer {
             var snapshot = mc.submit(() -> engine.snapshot(mc)).join();
             var hello = new JsonObject();
             hello.addProperty("mouse_input", true);
+            hello.addProperty("inspect_input", true);
             hello.add("persistent", JSON.toJsonTree(snapshot.persistent()));
             send(peer, hello);
             var program = readProgram(peer);
+            if (program.has("op")) {
+                if (!"inspect_input".equals(program.get("op").getAsString())) throw new IllegalArgumentException("unknown operation");
+                var state = mc.submit(() -> engine.inspect(mc)).join();
+                send(peer, JSON.toJsonTree(state).getAsJsonObject());
+                return;
+            }
             var result = mc.submit(() -> engine.start(mc, snapshot, program)).join();
             var probe = ByteBuffer.allocate(1);
             Playback.Observation frame;

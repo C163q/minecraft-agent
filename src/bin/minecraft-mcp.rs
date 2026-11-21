@@ -68,6 +68,48 @@ fn check_game_support(program: &DispatchProgram, hello: &Value) -> Result<()> {
     Ok(())
 }
 
+fn connect_game(call: &Mutex<Call>) -> Result<(BufReader<UnixStream>, Value)> {
+    let path = env::var_os("MINECRAFT_AGENT_SOCKET")
+        .ok_or("set MINECRAFT_AGENT_SOCKET to the game socket path")?;
+    let socket = UnixStream::connect(path)?;
+    {
+        let mut state = call.lock().unwrap();
+        if state.cancelled {
+            return Err("request cancelled".into());
+        }
+        state.socket = Some(socket.try_clone()?);
+    }
+    let mut reader = BufReader::new(socket);
+    let hello = receive(&mut reader)?;
+    Ok((reader, hello))
+}
+
+fn inspect(args: Option<&Value>, call: &Mutex<Call>) -> Result<Value> {
+    if args.is_some_and(|v| !v.as_object().is_some_and(|o| o.is_empty())) {
+        return Err("inspect_input accepts no arguments".into());
+    }
+    let (mut reader, hello) = connect_game(call)?;
+    if hello["inspect_input"] != true {
+        return Err(
+            "installed Fabric mod lacks inspect_input; update the mod and restart Minecraft".into(),
+        );
+    }
+    reader
+        .get_mut()
+        .write_all(b"{\"op\":\"inspect_input\"}\n")?;
+    let state = receive(&mut reader)?;
+    Ok(json!({"structuredContent":state,"content":[{"type":"text","text":state.to_string()}]}))
+}
+
+fn inspect_tool() -> Value {
+    json!({
+        "name": "inspect_input",
+        "description": "Inspect current script-held keys, mouse buttons and unfinished mouse movements without advancing input. See docs/input-script/inspect.md.",
+        "inputSchema": {"type":"object", "properties":{}, "additionalProperties":false},
+        "annotations": {"readOnlyHint":true}
+    })
+}
+
 fn play(args: &Value, call: &Mutex<Call>) -> Result<Value> {
     let args = args.as_object().ok_or("expected script or path")?;
     if args.len() != 1 {
@@ -83,18 +125,7 @@ fn play(args: &Value, call: &Mutex<Call>) -> Result<Value> {
     };
     let script = source.load(&env::current_dir()?)?;
     let max_speed = max_mouse_speed()?;
-    let path = env::var_os("MINECRAFT_AGENT_SOCKET")
-        .ok_or("set MINECRAFT_AGENT_SOCKET to the game socket path")?;
-    let mut socket = UnixStream::connect(path)?;
-    {
-        let mut state = call.lock().unwrap();
-        if state.cancelled {
-            return Err("request cancelled".into());
-        }
-        state.socket = Some(socket.try_clone()?);
-    }
-    let mut reader = BufReader::new(socket.try_clone()?);
-    let hello = receive(&mut reader)?;
+    let (mut reader, hello) = connect_game(call)?;
     let persistent: BTreeSet<String> = serde_json::from_value(hello["persistent"].clone())?;
     let program = script.compile(persistent);
     check_game_support(&program, &hello)?;
@@ -109,10 +140,10 @@ fn play(args: &Value, call: &Mutex<Call>) -> Result<Value> {
         })
         .collect();
     serde_json::to_writer(
-        &mut socket,
+        reader.get_mut(),
         &json!({"keys":program.keys,"runs":runs,"persistent":program.persistent,"max_speed":max_speed}),
     )?;
-    socket.write_all(b"\n")?;
+    reader.get_mut().write_all(b"\n")?;
     let reply = receive(&mut reader)?;
     let data = reply["png"].as_str().ok_or("missing END image")?;
     let (screenshot_id, width, height) = hints::remember(&reply)?;
@@ -131,7 +162,7 @@ fn respond(request: &Value) -> Value {
             json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"minecraft-agent","version":env!("CARGO_PKG_VERSION")}})
         }
         Some("tools/list") => {
-            json!({"tools":[{"name":"input_script","description":"Run a keyboard and mouse input script from exactly one of script or path and observe the END frame. See docs/input-script/README.md.","inputSchema":{"type":"object","properties":{"script":{"type":"string"},"path":{"type":"string"}},"additionalProperties":false}},hints::tool()]})
+            json!({"tools":[{"name":"input_script","description":"Run a keyboard and mouse input script from exactly one of script or path and observe the END frame. See docs/input-script/README.md.","inputSchema":{"type":"object","properties":{"script":{"type":"string"},"path":{"type":"string"}},"additionalProperties":false}},inspect_tool(),hints::tool()]})
         }
         Some("ping") => json!({}),
         method => {
@@ -175,7 +206,9 @@ fn main() -> io::Result<()> {
             continue;
         };
         let tool = request["params"]["name"].as_str();
-        if method != Some("tools/call") || !matches!(tool, Some("input_script" | "cursor_hint")) {
+        if method != Some("tools/call")
+            || !matches!(tool, Some("input_script" | "cursor_hint" | "inspect_input"))
+        {
             send(&respond(&request))?;
             continue;
         }
@@ -194,6 +227,7 @@ fn main() -> io::Result<()> {
         thread::spawn(move || {
             let args = &request["params"]["arguments"];
             let result = match request["params"]["name"].as_str() {
+                Some("inspect_input") => inspect(request["params"].get("arguments"), &call),
                 Some("cursor_hint") => hints::annotate(args),
                 _ => play(args, &call),
             }

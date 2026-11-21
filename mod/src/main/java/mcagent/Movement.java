@@ -1,10 +1,24 @@
 package mcagent;
 
 import java.util.ArrayList;
+import java.util.List;
 
 /** Unfinished relative moves in the script's pixel coordinates. Client-thread only. */
 final class Movement {
     record Delta(double x, double y) {}
+    // The requested speed is a scalar for straight moves, or an (x,y) pair for per-axis moves.
+    record Pending<S>(Delta remaining_px, S requested_speed_px_per_tick) {}
+
+    List<Pending<?>> inspect() {
+        var result = new ArrayList<Pending<?>>(active.size());
+        for (var move : active) {
+            var remaining = new Delta(move.x.remaining, move.y.remaining);
+            if (move.straight) result.add(new Pending<>(remaining, move.speedX));
+            else result.add(new Pending<>(remaining, new Delta(move.speedX, move.speedY)));
+        }
+        return result;
+    }
+
     private static final class Axis {
         double remaining, roundoff;
         final double halfUlp;

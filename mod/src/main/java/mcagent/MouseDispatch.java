@@ -8,6 +8,10 @@ import net.minecraft.client.input.MouseButtonInfo;
 
 /** Converts at activation, then feeds each combined step through the native input handlers. */
 final class MouseDispatch {
+    private static final Map<String,Integer> BUTTONS = Map.of(
+        "left", InputConstants.MOUSE_BUTTON_LEFT, "right", InputConstants.MOUSE_BUTTON_RIGHT,
+        "middle", InputConstants.MOUSE_BUTTON_MIDDLE);
+
     record Quantity(String unit, double value) {
         static Quantity read(JsonObject json) {
             String unit = json.get("unit").getAsString();
@@ -43,12 +47,8 @@ final class MouseDispatch {
             }
             var buttons = new TreeMap<Integer,String>();
             if (run.has("buttons")) run.getAsJsonObject("buttons").entrySet().forEach(entry -> {
-                int code = switch (entry.getKey()) {
-                    case "left" -> InputConstants.MOUSE_BUTTON_LEFT;
-                    case "middle" -> InputConstants.MOUSE_BUTTON_MIDDLE;
-                    case "right" -> InputConstants.MOUSE_BUTTON_RIGHT;
-                    default -> throw new IllegalArgumentException("unknown mouse button " + entry.getKey());
-                };
+                Integer code = BUTTONS.get(entry.getKey());
+                if (code == null) throw new IllegalArgumentException("unknown mouse button " + entry.getKey());
                 String action = entry.getValue().getAsString();
                 if (!Set.of("temporary", "press", "release").contains(action))
                     throw new IllegalArgumentException("unknown mouse action " + action);
@@ -60,6 +60,16 @@ final class MouseDispatch {
 
     private final Movement movement = new Movement();
     private final Set<Integer> persistent = new TreeSet<>(), held = new TreeSet<>();
+
+    Map<String,String> inspectButtons() {
+        var result = new TreeMap<String,String>();
+        BUTTONS.forEach((name, code) -> {
+            if (held.contains(code)) result.put(name, persistent.contains(code) ? "persistent" : "temporary");
+        });
+        return result;
+    }
+
+    List<Movement.Pending<?>> inspectMoves() { return movement.inspect(); }
 
     boolean pending() { return movement.pending(); }
     boolean active() { return pending() || !held.isEmpty(); }

@@ -28,6 +28,16 @@ final class KeyDispatch {
 
     boolean isDown(int code) { return held.contains(code); }
 
+    Map<String,String> inspect(Set<String> persistent) {
+        var result = new TreeMap<String,String>();
+        for (int code : held) {
+            String id = InputConstants.Type.KEYBOARD.getOrCreate(code).getName();
+            String name = id.substring("key.keyboard.".length()).replace('.', '_');
+            result.put(name, persistent.contains(name) ? "persistent" : "temporary");
+        }
+        return result;
+    }
+
     private static int modifier(int code) {
         return switch (code) {
             case InputConstants.KEY_LSHIFT -> SDL_KMOD_LSHIFT;

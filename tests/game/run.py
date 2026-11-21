@@ -41,7 +41,7 @@ def exercise(client, work, log, codex_env):
     rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}})
     client.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
     client.stdin.flush()
-    assert {t["name"] for t in rpc("tools/list", {})["tools"]} == {"input_script", "cursor_hint"}
+    assert {t["name"] for t in rpc("tools/list", {})["tools"]} == {"input_script", "cursor_hint", "inspect_input"}
 
     def play(args, expected_ticks, name, world="paused"):
         reply = rpc("tools/call", {"name": "input_script", "arguments": args})
@@ -62,9 +62,19 @@ def exercise(client, work, log, codex_env):
         text = log.read_text()[offset:]
         return re.findall(r"AGENT_SAMPLE ([01]{3})", text), re.findall(r"AGENT_KEY (\d+ [01])", text)
 
+    def inspect():
+        reply = rpc("tools/call", {"name": "inspect_input", "arguments": {}})
+        assert not reply.get("isError"), reply
+        text, = reply["content"]
+        state = json.loads(text["text"])
+        assert reply["structuredContent"] == state
+        return state
+
+    assert inspect()["world"] == "unpaused"
     initial = play(block(), 0, "initial")
     if codex_env is not None:
         from codex_mouse import exercise_codex
+        play(block("Mouse(left)"), 1, "before-codex")
         exercise_codex(work, codex_env, root / "target/debug/minecraft-mcp")
         (work / "reset-view").touch()
         deadline = time.monotonic() + 4
@@ -74,6 +84,43 @@ def exercise(client, work, log, codex_env):
             time.sleep(.02)
         initial = play(block("Wait(2)"), 2, "initial")
     exercise_mouse(work, log, play, rpc, block, initial)
+
+    play(block("Mouse(left)"), 1, "temporary-left")
+    expected = {"world": "paused", "held": {"keys": {}, "buttons": {"left": "temporary"}},
+                "moves": [], "max_speed_px_per_tick": 50}
+    assert inspect() == expected
+    bad = rpc("tools/call", {"name": "inspect_input", "arguments": {"advance": True}})
+    assert bad.get("isError")
+    play(block("WaitMouseMove()"), 0, "inspect-idle")
+    assert inspect() == expected
+    play(block("MousePress(left) KeyPress(left_shift)", "Mouse(left) Key(a)"), 2, "inspect-handoff")
+    assert inspect()["held"] == {"keys": {"left_shift": "persistent", "a": "temporary"},
+                                 "buttons": {"left": "persistent"}}
+    play(block("MouseRelease(left) KeyRelease(left_shift) MouseMove(Px(160), Px(0), Px(80))"), 1, "inspect-pending")
+    expected["held"]["buttons"].clear()
+    expected["moves"] = [{"remaining_px": {"x": 110, "y": 0}, "requested_speed_px_per_tick": 80}]
+    offset = len(log.read_text())
+    (work / "measure-world").touch()
+    try:
+        for _ in range(3):
+            assert inspect() == expected
+            time.sleep(.1)
+    finally:
+        (work / "measure-world").unlink()
+    measured = re.findall(r"AGENT_WORLD (true|false) (\d+)", log.read_text()[offset:])
+    assert len(measured) >= 2 and len(set(measured)) == 1 and measured[0][0] == "true", measured
+    assert trace(offset) == ([], [])
+    play(block("Wait(1)"), 1, "inspect-step")
+    assert inspect()["moves"][0]["remaining_px"]["x"] == 60
+    play(block("MouseMove(Px(-100), Px(0), Px(40), Px(0)) MouseMove(Px(-160), Px(0), Px(20))"),
+         1, "inspect-overlap")
+    assert inspect()["moves"] == [
+        {"remaining_px": {"x": -60, "y": 0}, "requested_speed_px_per_tick": {"x": 40, "y": 0}},
+        {"remaining_px": {"x": -140, "y": 0}, "requested_speed_px_per_tick": 20},
+    ]
+    play(block("CLEAR"), 0, "inspect-clear")
+    assert inspect()["moves"] == []
+    print("PASS: read-only snapshots, held state, per-move remainders, server pause and world time.")
     offset = len(log.read_text())
     (work / "jump.input").write_text(block("KeyPress(w)", "Wait(5)", "Key(space)", "KeyRelease(w)")["script"])
     play({"path": "jump.input"}, 8, "jump")
@@ -99,6 +146,7 @@ def exercise(client, work, log, codex_env):
     masks = re.findall(r"AGENT_KEY 26 [01] mods=(\d+)", log.read_text()[offset:])
     assert all(int(mask) & 1 for mask in masks) and len(masks) == 2, masks
     play(block("Key(escape)"), 1, "menu", world="not_needed")
+    assert inspect()["world"] == "not_needed"
     play(block("Wait(1)", "Key(escape)", "Wait(1)"), 3, "close-menu")
     (work / "slow").touch()
     time.sleep(.4)

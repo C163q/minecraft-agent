@@ -21,11 +21,16 @@ public final class Playback {
     private ClientLevel level;
     private Request active;
     private boolean freeze;
+    private static final double DEFAULT_MAX_SPEED = 50;
+    private double maxSpeed = DEFAULT_MAX_SPEED;
     private final AtomicReference<Fence> fence = new AtomicReference<>();
     private int nextMarker = new Random().nextInt();
 
     record Snapshot(ClientLevel level, Set<String> persistent) {}
     record Observation(long ticks, String world, NativeImage image, FrameCamera.View camera) {}
+    record Held(Map<String,String> keys, Map<String,String> buttons) {}
+    record InputState(String world, Held held, List<Movement.Pending<?>> moves, double max_speed_px_per_tick) {}
+
     private record Run(int line, long ticks, Set<Integer> held, MouseDispatch.Actions mouse,
                        boolean waitMouse, boolean clear) {
         static Run read(JsonObject run, Map<String,Integer> codes) {
@@ -48,7 +53,6 @@ public final class Playback {
         final ArrayDeque<Run> runs = new ArrayDeque<>();
         final CompletableFuture<Observation> result = new CompletableFuture<>();
         Set<String> persistent;
-        double maxSpeed;
         long remaining, executed;
         boolean inTick, ended, renderReady;
     }
@@ -58,9 +62,19 @@ public final class Playback {
     }
 
     Snapshot snapshot(Minecraft mc) {
-        checkContext(mc);
         if (!supports(mc)) throw new IllegalStateException("requires a local single-player world or menu");
-        return new Snapshot(mc.level, persistent);
+        return new Snapshot(mc.level, level == mc.level ? persistent : Set.of());
+    }
+
+    InputState inspect(Minecraft mc) {
+        if (!supports(mc)) throw new IllegalStateException("requires a local single-player world or menu");
+        boolean sameLevel = level == mc.level;
+        String world;
+        if (sameLevel && freeze && mc.isPaused()) world = "paused";
+        else if (mc.level == null || mc.gui.isPausing() || mc.isPaused()) world = "not_needed";
+        else world = "unpaused";
+        if (!sameLevel) return new InputState(world, new Held(Map.of(), Map.of()), List.of(), DEFAULT_MAX_SPEED);
+        return new InputState(world, new Held(keys.inspect(persistent), mouse.inspectButtons()), mouse.inspectMoves(), maxSpeed);
     }
 
     CompletableFuture<Observation> start(Minecraft mc, Snapshot snapshot, JsonObject program) {
@@ -76,8 +90,8 @@ public final class Playback {
         });
         for (var name : persistent) codes.computeIfAbsent(name, KeyDispatch::resolve);
         var request = new Request();
-        request.maxSpeed = program.has("max_speed") ? program.get("max_speed").getAsDouble() : 50;
-        if (!Double.isFinite(request.maxSpeed) || request.maxSpeed <= 0)
+        double requestedCap = program.has("max_speed") ? program.get("max_speed").getAsDouble() : DEFAULT_MAX_SPEED;
+        if (!Double.isFinite(requestedCap) || requestedCap <= 0)
             throw new IllegalArgumentException("max_speed must be finite and positive");
         for (var item : program.getAsJsonArray("runs"))
             request.runs.add(Run.read(item.getAsJsonObject(), codes));
@@ -88,6 +102,7 @@ public final class Playback {
             next.add(name);
         }
         request.persistent = Set.copyOf(next);
+        maxSpeed = requestedCap;
         active = request;
         freeze = false;
         resolveControls(mc, request);
@@ -101,6 +116,7 @@ public final class Playback {
         if (mc.level != level || ((freeze || active != null || !keys.isEmpty() || mouse.active()) && !supports(mc))) {
             reset(mc, "world changed during input session");
             level = mc.level;
+            maxSpeed = DEFAULT_MAX_SPEED;
         }
     }
 
@@ -130,7 +146,7 @@ public final class Playback {
                 r.remaining = run.ticks;
                 keys.apply(mc, run.held);
             }
-            mouse.tick(mc, run.mouse, r.maxSpeed, keys.modifiers());
+            mouse.tick(mc, run.mouse, maxSpeed, keys.modifiers());
         } catch (RuntimeException error) {
             reset(mc, "line " + run.line + ": " + error.getMessage());
             return true;
