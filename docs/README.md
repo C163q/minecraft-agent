@@ -23,3 +23,4 @@
 - [Codex 通过 Rust MCP 直接观察 Minecraft 停止帧](research/2026-11-21-codex-image.md)
 - [Codex 在两种 GUI 缩放下看图取出钻石](research/2026-11-21-codex-gui-click.md)
 - [Codex 第一人称瞄准与持续挖掘](research/2026-11-21-first-person-mining.md)
+- [未完成的鼠标移动跨暂停续跑与清除](research/2026-11-21-buffered-mouse.md)
