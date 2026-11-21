@@ -15,12 +15,14 @@ END
 ```json
 {
   "world": "paused",
+  "pause_reason": "end",
   "held": {
     "keys": {},
     "buttons": {"left": "temporary"}
   },
   "moves": [],
-  "max_speed_px_per_tick": 50
+  "max_speed_px_per_tick": 50,
+  "queue": {"total": 0, "entries": [], "next_cursor": null}
 }
 ```
 
@@ -30,3 +32,16 @@ END
 - `max_speed_px_per_tick` 是游戏端最近接受的脚本使用的合速度上限，新世界在首次提交前为 50。下一次提交时使用提交方的 MCP 配置。
 
 例如 `MouseMove(Px(160), Px(0), Px(80))` 执行一拍后，在默认限速下，该项为 `{"remaining_px":{"x":110,"y":0},"requested_speed_px_per_tick":80}`。追加 `Wait(1)` 后 X 余量为 60；执行 `CLEAR` 后，`moves` 为空数组。
+
+## 队列预览、分页和导出
+
+默认返回至多 5 个待执行段。`queue.total` 是段数，一个长等待占一段。`entries` 按提交块、块内行序排列。`block` 是游戏会话中的块编号，`line` 是源文件行号，`source` 标明待执行的指令。固定时长段的 `remaining_ticks` 是十进制字符串，可准确表示 64 位剩余拍数。行首等待、输入和行末暂停可各占一段。块末隐含的 END 不计入段数。不同块剩余的首拍会同时执行，详见[暂停与继续](pause.md)。
+
+| 调用参数 | 返回内容 |
+| --- | --- |
+| `{}` | 当前状态、停止原因及队列预览 |
+| `{"queue":"inline","limit":20}` | 第一页，默认 20 段，每页支持 1 至 100 段 |
+| `{"queue":"inline","cursor":"<next_cursor>","limit":20}` | 同一张快照的下一页，期间游戏可以恢复或清除队列；最后一页的游标为 null |
+| `{"queue":"file","path":".tmp/pending.json"}` | 将含全部段的 JSON 快照原子写入 MCP 主机上的新文件，工具结果返回状态摘要、进行中的移动项数（`move_count`）、待执行段数和文件绝对路径 |
+
+文件相对路径以 MCP 工作目录为基准，使用已存在的父目录和新的文件名。游标属于当前 MCP 进程，保留最近 8 个需要翻页的快照；旧游标失效时可重新从第一页查询。导出的等待指令采用标准写法（例如 `Wait(0005)` 记为 `Wait(5)`），已经开始的长等待以 `remaining_ticks` 表示尚未执行的长度。`pause_reason` 描述停在什么位置，在正常运行时为 null。

@@ -6,11 +6,17 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import net.fabricmc.api.ClientModInitializer;
 import net.minecraft.client.*;
+import net.minecraft.client.gui.screens.options.controls.KeyBindsScreen;
+import net.minecraft.client.resources.language.I18n;
 import net.minecraft.world.item.*;
 import net.minecraft.world.level.*;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.levelgen.WorldOptions;
 import net.minecraft.world.level.levelgen.presets.WorldPresets;
+import org.lwjgl.sdl.SDL_Event;
+import org.lwjgl.sdl.SDLKeyboard;
+import org.lwjgl.sdl.SDLVideo;
+import static org.lwjgl.sdl.SDLEvents.*;
 
 public final class Observer implements ClientModInitializer {
     public static volatile boolean recording, slow, measureWorld;
@@ -25,6 +31,60 @@ public final class Observer implements ClientModInitializer {
         while (!condition.getAsBoolean()) {
             if (System.nanoTime() > deadline) throw new IllegalStateException("setup timed out");
             Thread.sleep(25);
+        }
+    }
+
+    private static void pushKey(Minecraft mc, int code, boolean down, boolean repeat) {
+        try (var event = SDL_Event.calloc()) {
+            short modifiers = SDLKeyboard.SDL_GetModState();
+            event.key().type(down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP)
+                .windowID(SDLVideo.SDL_GetWindowID(mc.getWindow().handle()))
+                .scancode(code).key(SDLKeyboard.SDL_GetKeyFromScancode(code, modifiers, false))
+                .mod(modifiers).down(down).repeat(repeat);
+            if (!SDL_PushEvent(event)) throw new IllegalStateException("SDL rejected test key");
+        }
+    }
+
+    private void observerInput(Minecraft mc) {
+        var request = Path.of("observer-input");
+        if (!Files.exists(request)) return;
+        try {
+            var command = Files.readString(request).strip().split(" ");
+            var key = InputConstants.getKey("key.keyboard." + command[1]);
+            var controls = mc.submit(() -> {
+                if (command[0].equals("bind")) {
+                    var binding = java.util.Arrays.stream(mc.options.keyMappings)
+                        .filter(k -> k.getName().equals("key.minecraft_agent.pause")).findFirst().orElseThrow();
+                    if (!I18n.get(binding.getName()).equals("Pause / Resume Minecraft Agent"))
+                        throw new AssertionError("missing Controls label: " + I18n.get(binding.getName()));
+                    var screen = new KeyBindsScreen(mc.gui.screen(), mc.options);
+                    mc.gui.setScreen(screen);
+                    screen.selectedKey = binding;
+                    pushKey(mc, key.getValue(), true, false);
+                    pushKey(mc, key.getValue(), false, false);
+                    return screen;
+                }
+                switch (command[0]) {
+                    case "press" -> pushKey(mc, key.getValue(), true, false);
+                    case "repeat" -> pushKey(mc, key.getValue(), true, true);
+                    case "release" -> pushKey(mc, key.getValue(), false, false);
+                    default -> throw new IllegalArgumentException("unknown observer input " + command[0]);
+                }
+                return null;
+            }).join();
+            await(() -> mc.submit(() -> !SDL_HasEvents(SDL_EVENT_KEY_DOWN, SDL_EVENT_KEY_UP)).join(), 3);
+            if (controls != null) mc.submit(() -> {
+                var binding = KeyMapping.get("key.minecraft_agent.pause");
+                if (controls.selectedKey != null || !binding.matches(key))
+                    throw new AssertionError("Controls did not bind " + key);
+                controls.onClose(); // The vanilla screen saves options when removed.
+                binding.setKey(InputConstants.UNKNOWN);
+                mc.options.load();
+                if (!binding.matches(key)) throw new AssertionError("Options did not restore " + key);
+            }).join();
+            Files.delete(request);
+        } catch (Exception error) {
+            throw new IllegalStateException("observer input failed", error);
         }
     }
 
@@ -65,6 +125,7 @@ public final class Observer implements ClientModInitializer {
                 recording = true;
                 Files.createFile(Path.of("ready"));
                 await(() -> {
+                    observerInput(mc);
                     if (Files.exists(Path.of("reset-view")) && !Files.exists(Path.of("view-reset"))) {
                         mc.submit(() -> { mc.player.setXRot(0); mc.player.setYRot(0); }).join();
                         try { Files.createFile(Path.of("view-reset")); }

@@ -2,11 +2,13 @@ package mcagenttest.mixin;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.locks.LockSupport;
 import mcagenttest.Observer;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Screenshot;
+import net.minecraft.client.gui.screens.PauseScreen;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.*;
@@ -15,6 +17,16 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(Minecraft.class)
 abstract class Frames {
     @Unique private boolean capturedRunningFrame;
+
+    @Inject(method="renderFrame", at=@At("HEAD"))
+    private void closeTransientMenu(CallbackInfo ci) throws IOException {
+        var mc = (Minecraft)(Object)this;
+        if (Observer.recording && mc.gui.screen() instanceof PauseScreen
+                && Files.deleteIfExists(Path.of("close-before-fence"))) {
+            // Drop vanilla's pause cause before Minecraft samples it at the end of this frame.
+            mc.gui.screen().onClose();
+        }
+    }
 
     @Inject(method="renderFrame", at=@At("RETURN"))
     private void captureResumedFrame(CallbackInfo ci) {

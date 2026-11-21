@@ -6,7 +6,7 @@
 
 构建与实机验证入口见[输入 Mod 与 Rust MCP](keyboard-bridge.md)。`minecraft-input` 的核心逻辑位于仓库根目录的 Rust 库中。用户和 LLM 使用[脚本语法参考](../input-script/README.md)。`Script::parse` 验证内联文本，`ScriptSource::load` 统一处理文本和文件，文件的相对路径基准由调用方传入。入口见[解析器](../../src/parser.rs)。
 
-每个游戏会话复用一个 [Keyboard](../../src/keyboard.rs)。`play(&script)` 返回惰性迭代器，对固定拍数的输入，每次取下一项推进一个输入 tick，得到源行号、本拍按下、释放和保持的键集合。暂停后继续同一段时保留迭代器；进入下一段时复用键盘状态。库的键盘预览把动态鼠标等待视为空闲。MCP 的 `Script::compile` 复用同一键状态逻辑，压缩连续等待并交给 Mod 在游戏线程逐拍派发。
+每个游戏会话复用一个 [Keyboard](../../src/keyboard.rs)。`play(&script)` 返回惰性迭代器，对固定拍数的输入，每次取下一项推进一个输入 tick，得到源行号、本拍按下、释放和保持的键集合。这个固定拍预览跳过零拍控制并把动态鼠标等待视为空闲；游戏端负责真正的中断、恢复和增量合并。MCP 的 `Script::compile` 复用同一键状态逻辑，压缩连续等待并交给 Mod 在游戏线程逐拍派发。
 
 在仓库根目录运行 `cargo test --offline` 验证语法、逐拍状态与示例。运行 `cargo clippy --offline --all-targets -- -D warnings` 检查代码。
 
@@ -24,7 +24,7 @@ javap -p -c -classpath "$MC_JAR" net.minecraft.client.server.IntegratedServer
 
 ## END 的返回条件
 
-`END` 结束当前输入段。在需要暂停的本地单人世界中，游戏输入链路使用以下返回条件。
+`END` 结束当前输入段。脚本中的 `PAUSE` 和运行中的暂停快捷键沿用同一个停止帧边界。在需要暂停的本地单人世界中，游戏输入链路使用以下返回条件。
 
 1. 停止消费当前段之后的输入，等待内置服务端确认世界已暂停。保留缓冲区中的待续输入。
 2. 在服务端线程同步本次观察所涉及、应当对玩家可见的待发变更。在箱子界面，同步当前容器的槽位。随后在同一游戏连接上发送属于本次请求的标记。

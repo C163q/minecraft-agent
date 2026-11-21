@@ -39,11 +39,13 @@ final class MouseDispatch {
                 var args = new ArrayList<Quantity>();
                 for (var arg : move.getAsJsonArray("args")) args.add(Quantity.read(arg.getAsJsonObject()));
                 if (args.size() < 2 || args.size() > 4) throw new IllegalArgumentException("expected two to four mouse arguments");
+                boolean absolute = move.get("absolute").getAsBoolean();
                 for (int i = 2; i < args.size(); ++i) {
-                    if (args.get(i).value < 0 || (args.size() == 3 && args.get(i).value == 0))
+                    boolean requiresSpeed = args.size() == 3 || (!absolute && args.get(i - 2).value != 0);
+                    if (args.get(i).value < 0 || (requiresSpeed && args.get(i).value == 0))
                         throw new IllegalArgumentException("invalid mouse speed");
                 }
-                moves.add(new Input(move.get("absolute").getAsBoolean(), args));
+                moves.add(new Input(absolute, args));
             }
             var buttons = new TreeMap<Integer,String>();
             if (run.has("buttons")) run.getAsJsonObject("buttons").entrySet().forEach(entry -> {

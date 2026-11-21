@@ -90,7 +90,7 @@ def exercise(client, work, log, codex_env):
     initial = play(block(), 0, "initial")
     if codex_env is not None:
         from codex_mouse import exercise_codex
-        play(block("Mouse(left)"), 1, "before-codex")
+        play(block("Mouse(left) PAUSE", "Wait(1)"), 1, "before-codex")
         exercise_codex(work, codex_env, root / "target/debug/minecraft-mcp")
         (work / "reset-view").touch()
         deadline = time.monotonic() + 4
@@ -103,7 +103,8 @@ def exercise(client, work, log, codex_env):
 
     play(block("Mouse(left)"), 1, "temporary-left")
     expected = {"world": "paused", "held": {"keys": {}, "buttons": {"left": "temporary"}},
-                "moves": [], "max_speed_px_per_tick": 50}
+                "moves": [], "max_speed_px_per_tick": 50, "pause_reason": "end",
+                "queue": {"total": 0, "entries": [], "next_cursor": None}}
     assert inspect() == expected
     bad = rpc("tools/call", {"name": "inspect_input", "arguments": {"advance": True}})
     assert bad.get("isError")
@@ -136,6 +137,8 @@ def exercise(client, work, log, codex_env):
     ]
     play(block("CLEAR"), 0, "inspect-clear")
     assert inspect()["moves"] == []
+    from pause import exercise_pause
+    exercise_pause(work, log, play, rpc, block, submit, receive)
     print("PASS: read-only snapshots, held state, per-move remainders, server pause and world time.")
     offset = len(log.read_text())
     (work / "jump.input").write_text(block("KeyPress(w)", "Wait(5)", "Key(space)", "KeyRelease(w)")["script"])
@@ -211,6 +214,10 @@ def main():
     mods = work / "mods"
     build_jar(root / "mod/src/main", mods / "minecraft-agent.jar", cp)
     build_jar(root / "tests/game", mods / "observer.jar", cp)
+    queue_cp = os.pathsep.join([str(mods / "minecraft-agent.jar"), cp])
+    subprocess.run(["javac", "--release", "25", "-proc:none", "-cp", queue_cp, "-d", classes,
+                    root / "tests/queue/InputQueueTest.java"], check=True)
+    subprocess.run(["java", "-cp", os.pathsep.join([str(classes), queue_cp]), "mcagent.InputQueueTest"], check=True)
     subprocess.run(["cargo", "build", "--offline", "--bin", "minecraft-mcp"], cwd=root, check=True)
     (work / "options.txt").write_text("onboardAccessibility:false\npauseOnLostFocus:false\nrenderDistance:4\nsimulationDistance:5\n")
     java = ["java", "-Xmx2G", "-XX:ActiveProcessorCount=4", "--enable-native-access=ALL-UNNAMED",

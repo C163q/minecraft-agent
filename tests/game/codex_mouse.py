@@ -12,10 +12,10 @@ from PIL import Image
 
 
 PROMPT = """只用 minecraft MCP 的游戏截图观察这个单人世界。让准星对准红色方块的中心。
-先调用 inspect_input，记录开始时脚本左键的保持方式。然后观察，调用 cursor_hint 在你选的点标记并看图核对，再按返回的转角转动视角。
+先调用 inspect_input，记录开始时脚本左键的保持方式，以及队列里首段的 source。然后观察，调用 cursor_hint 在你选的点标记并看图核对，再按返回的转角转动视角。
 请保持站位不动，用停止帧检查最后准星是否在方块上；需要时可重新选点微调。
 脚本语法按需查阅，入口为 docs/input-script/README.md。读取资料时每次只执行 cat 加一个或多个文档相对路径；
-只从工具返回的图片判断游戏内容。最后返回 JSON，包含 initial_left（首次查询得到的左键保持方式）、centered（布尔值）与 observation（你看到的情况）。"""
+只从工具返回的图片判断游戏内容。最后返回 JSON，包含 initial_left（首次查询得到的左键保持方式）、next_input（待执行首段的 source）、centered（布尔值）与 observation（你看到的情况）。"""
 
 
 def red(pixel):
@@ -62,6 +62,7 @@ def verify_session(trial, docs):
                 if not frames:
                     state = json.loads(result["content"][0]["text"])
                     assert state["world"] == "paused" and state["held"]["buttons"]["left"] == "temporary", state
+                    assert state["pause_reason"] == "pause" and state["queue"]["entries"][0]["source"] == "Wait(1)"
                     saw_inspect = True
                 continue
             text, image = result["content"]
@@ -91,7 +92,7 @@ def verify_session(trial, docs):
     assert saw_inspect and saw_target_hint and saw_turn, "missing on-target hint or subsequent angular movement"
     assert centered(final), "final frame missed the red landmark"
     answer = json.loads((trial / "answer.json").read_text())
-    assert answer["initial_left"] == "temporary" and answer["centered"] is True and answer["observation"].strip(), answer
+    assert answer["initial_left"] == "temporary" and answer["next_input"] == "Wait(1)" and answer["centered"] is True and answer["observation"].strip(), answer
     print(f"PASS: Codex saw {count} MCP images and centered the selected red block. Evidence: {trial}", flush=True)
 
 
@@ -101,8 +102,8 @@ def exercise_codex(work, env, binary):
     trial.mkdir()
     schema = trial / "answer.schema.json"
     schema.write_text(json.dumps({
-        "type": "object", "properties": {"initial_left": {"type": "string"}, "centered": {"type": "boolean"}, "observation": {"type": "string"}},
-        "required": ["initial_left", "centered", "observation"], "additionalProperties": False,
+        "type": "object", "properties": {"initial_left": {"type": "string"}, "next_input": {"type": "string"}, "centered": {"type": "boolean"}, "observation": {"type": "string"}},
+        "required": ["initial_left", "next_input", "centered", "observation"], "additionalProperties": False,
     }))
     with tempfile.TemporaryDirectory(prefix="mc-codex-docs-") as directory:
         runner = Path(directory)

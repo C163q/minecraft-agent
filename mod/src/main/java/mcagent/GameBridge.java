@@ -79,13 +79,19 @@ public final class GameBridge implements ClientModInitializer {
             var hello = new JsonObject();
             hello.addProperty("mouse_input", true);
             hello.addProperty("inspect_input", true);
+            hello.addProperty("pause_queue", true);
             hello.add("persistent", JSON.toJsonTree(snapshot.persistent()));
             send(peer, hello);
             var program = readProgram(peer);
             if (program.has("op")) {
                 if (!"inspect_input".equals(program.get("op").getAsString())) throw new IllegalArgumentException("unknown operation");
                 var state = mc.submit(() -> engine.inspect(mc)).join();
-                send(peer, JSON.toJsonTree(state).getAsJsonObject());
+                var reply = JSON.toJsonTree(state).getAsJsonObject();
+                if (!program.has("queue_version")) {
+                    reply.remove("queue_entries");
+                    reply.remove("pause_reason");
+                }
+                send(peer, reply);
                 return;
             }
             var result = mc.submit(() -> engine.start(mc, snapshot, program)).join();
@@ -108,6 +114,7 @@ public final class GameBridge implements ClientModInitializer {
             var reply = new JsonObject();
             reply.addProperty("world", frame.world());
             reply.addProperty("ticks", frame.ticks());
+            reply.addProperty("pause_reason", frame.pauseReason());
             reply.add("camera", JSON.toJsonTree(frame.camera()));
             try (var image = frame.image()) {
                 var rgb = new BufferedImage(image.getWidth(), image.getHeight(), BufferedImage.TYPE_INT_RGB);
