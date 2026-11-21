@@ -17,3 +17,4 @@
 
 - [26.3 单人世界与箱子界面暂停](research/2026-11-21-container-pause.md)
 - [26.3 输入后端与 MCP 图片传输](research/2026-11-21-input-and-mcp.md)
+- [普通键盘输入与 END 的停止边界](research/2026-11-21-keyboard-tick.md)
