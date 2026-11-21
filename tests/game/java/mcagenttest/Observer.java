@@ -126,6 +126,22 @@ public final class Observer implements ClientModInitializer {
                 Files.createFile(Path.of("ready"));
                 await(() -> {
                     observerInput(mc);
+                    if (Files.exists(Path.of("inspect-player"))) {
+                        String state = mc.submit(() -> {
+                            var p = mc.player;
+                            boolean deathScreen = mc.gui.screen() instanceof net.minecraft.client.gui.screens.DeathScreen;
+                            return p.getX() + " " + p.getZ() + " " + (p.getZ() - p.zo) + " " + deathScreen + " " + p.isDeadOrDying();
+                        }).join();
+                        try {
+                            Files.writeString(Path.of("player-state"), state);
+                            Files.delete(Path.of("inspect-player"));
+                        } catch (java.io.IOException error) { throw new java.io.UncheckedIOException(error); }
+                    }
+                    if (Files.exists(Path.of("request-respawn"))) {
+                        mc.submit(() -> mc.player.respawn()).join();
+                        try { Files.delete(Path.of("request-respawn")); }
+                        catch (java.io.IOException error) { throw new java.io.UncheckedIOException(error); }
+                    }
                     if (Files.exists(Path.of("reset-view")) && !Files.exists(Path.of("view-reset"))) {
                         mc.submit(() -> { mc.player.setXRot(0); mc.player.setYRot(0); }).join();
                         try { Files.createFile(Path.of("view-reset")); }

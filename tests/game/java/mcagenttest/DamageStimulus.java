@@ -21,6 +21,12 @@ public final class DamageStimulus {
             String mode = Files.readString(file).trim();
             Files.delete(file);
             var mc = Minecraft.getInstance();
+            if (mode.equals("slide-then-push")) {
+                // A free sideways substep and a blocked forward substep in the same tick.
+                mc.player.move(net.minecraft.world.entity.MoverType.SELF, new net.minecraft.world.phys.Vec3(.015, 0, 0));
+                mc.player.move(net.minecraft.world.entity.MoverType.SELF, new net.minecraft.world.phys.Vec3(0, 0, .05));
+                return;
+            }
             if (mode.equals("late-drop")) {
                 dropAtNextMarker = true;
                 return;
@@ -41,6 +47,31 @@ public final class DamageStimulus {
         var level = player.level();
         var source = new DamageSource(player.damageSources().mobAttack(player).typeHolder(),
             player.position().add(player.getLookAngle()));
+        if (mode.equals("collision-room")) {
+            for (int x = -3; x <= 6; x++) for (int z = -6; z <= 3; z++) {
+                var floor = new net.minecraft.core.BlockPos(x, 94, z);
+                level.setBlockAndUpdate(floor, net.minecraft.world.level.block.Blocks.STONE.defaultBlockState());
+                for (int height = 1; height <= 3; height++) {
+                    var block = x == -2 || z == 2 ? net.minecraft.world.level.block.Blocks.STONE
+                                                    : net.minecraft.world.level.block.Blocks.AIR;
+                    level.setBlockAndUpdate(floor.above(height), block.defaultBlockState());
+                }
+            }
+            player.connection.teleport(0.5, 95, 0.5, 0, 0);
+            return;
+        }
+        if (mode.startsWith("lethal-")) {
+            var server = level.getServer();
+            level.getGameRules().set(net.minecraft.world.level.gamerules.GameRules.IMMEDIATE_RESPAWN,
+                mode.equals("lethal-immediate"), server);
+            player.setItemInHand(InteractionHand.OFF_HAND,
+                mode.equals("lethal-totem") ? new ItemStack(Items.TOTEM_OF_UNDYING) : ItemStack.EMPTY);
+            player.damageCooldownTime = 0;
+            boolean accepted = player.hurtServer(level, player.damageSources().generic(), 1000);
+            System.out.println("AGENT_LETHAL " + mode + " dead=" + player.isDeadOrDying() +
+                " accepted=" + accepted + " offhandEmpty=" + player.getOffhandItem().isEmpty());
+            return;
+        }
         if (mode.equals("change-level")) {
             var nether = level.getServer().getLevel(net.minecraft.world.level.Level.NETHER);
             player.teleportTo(nether, 0, 90, 0, java.util.Set.of(), 0, 0, false);
@@ -49,6 +80,9 @@ public final class DamageStimulus {
         if (mode.equals("respawn")) {
             var next = level.getServer().getPlayerList().respawn(player, false,
                 net.minecraft.world.entity.Entity.RemovalReason.KILLED);
+            // Vanilla installs the new player on the connection after PlayerList.respawn returns.
+            next.connection.player = next;
+            next.connection.resetPosition();
             next.setHealth(12);
             System.out.println("AGENT_RESPAWN " + next.getId());
             return;

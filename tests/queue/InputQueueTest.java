@@ -275,7 +275,29 @@ public final class InputQueueTest {
         equal("pause", controls());
     }
 
+    void onlyThisDeathsHandlersCrossDimensions() {
+        String program = """
+            {"queue_version":1,"persistent":[],"runs":[
+              {"line":2,"ticks":"0","held":[],"event":"Death","body":[{"line":4,"ticks":"80","held":[]}]},
+              {"line":6,"ticks":"100","held":[]}]}
+            """;
+        queue.submit(wire(program));
+        equal(null, controls());
+        long first = queue.observe("Death");
+        equal(null, controls());
+        long owner = queue.submit(wire(program));
+        equal(null, controls());
+        long second = queue.observe("Death");
+        equal(true, first != second);
+        queue.retainObservation(second);
+        equal(List.of(), queue.listeners());
+        equal(1, queue.inspect().size());
+        equal(owner, queue.inspect().getFirst().listener().block());
+        equal("80", queue.inspect().getFirst().remaining_ticks());
+    }
+
     public static void main(String[] args) {
+        new InputQueueTest().onlyThisDeathsHandlersCrossDimensions();
         new InputQueueTest().lastExplicitPauseExpiresOwner();
         new InputQueueTest().onlyClearingListenersPreservesOldControls();
         new InputQueueTest().observedBeforeDispatchMergesInRegistrationOrder();

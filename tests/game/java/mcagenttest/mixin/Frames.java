@@ -21,6 +21,8 @@ abstract class Frames {
     @Inject(method="renderFrame", at=@At("HEAD"))
     private void closeTransientMenu(CallbackInfo ci) throws IOException {
         var mc = (Minecraft)(Object)this;
+        if (!mc.isPaused() && mc.gui.screen() instanceof net.minecraft.client.gui.screens.DeathScreen
+                && Files.deleteIfExists(Path.of("respawn-after-resume"))) mc.player.respawn();
         if (Observer.recording && mc.gui.screen() instanceof PauseScreen
                 && Files.deleteIfExists(Path.of("close-before-fence"))) {
             // Drop vanilla's pause cause before Minecraft samples it at the end of this frame.

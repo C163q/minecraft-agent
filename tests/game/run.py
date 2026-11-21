@@ -213,7 +213,7 @@ def exercise(client, work, log, codex_env):
     assert samples[-1] == "000" and events == ["26 1", "26 0"], (samples, events)
     assert not has_pause_icon(work / "resumed.png"), "pause indicator persisted after resuming"
     from events import exercise_events
-    exercise_events(work, log, play, rpc, block, inspect)
+    exercise_events(work, log, play, rpc, block, inspect, codex_env)
     print("PASS: eight ticks, handoff, remapping, invalid input, native pause, catch-up ticks, cancellation and END images.")
 
 

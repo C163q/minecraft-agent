@@ -62,6 +62,7 @@ public final class Playback {
         final CompletableFuture<Observation> result = new CompletableFuture<>();
         final boolean includeScreenshot;
         long executed;
+        long deathObservation;
 
         Request(JsonObject program) {
             var option = program.get("include_screenshot");
@@ -192,8 +193,22 @@ public final class Playback {
         resolveControls(mc);
     }
 
-    public void observe(Minecraft mc, String event) {
-        if (mc.level != null && mc.level == level && supports(mc)) queue.observe(event);
+    public long observe(Minecraft mc, String event) {
+        if (mc.level == null || mc.level != level || !supports(mc)) return 0;
+        long observation = queue.observe(event);
+        if (observation != 0 && active != null && event.equals("Death")) active.deathObservation = observation;
+        return observation;
+    }
+
+    public void afterDeathRespawn(Minecraft mc, ClientLevel previousLevel, long observation) {
+        if (level != previousLevel || mc.level == null || mc.level == previousLevel || !supports(mc)) return;
+        if (observation == 0 || (active != null && active.deathObservation != observation)) return;
+        if (!queue.hasObservation(observation) && (active == null || running)) return;
+        queue.retainObservation(observation);
+        level = mc.level;
+        contactPlayer = null;
+        mouse.reset(mc, keys.modifiers());
+        keys.apply(mc, Set.of());
     }
 
     public void collision(Minecraft mc, LocalPlayer player, Vec3 requested, Vec3 allowed) {

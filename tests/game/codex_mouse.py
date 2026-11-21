@@ -103,14 +103,13 @@ def verify_session(trial, docs):
     print(f"PASS: Codex saw {count} MCP images and centered the selected red block. Evidence: {trial}", flush=True)
 
 
-def exercise_codex(work, env, binary):
+def run_codex(trial, env, binary, prompt, fields):
     root = Path(__file__).resolve().parents[2]
-    trial = work / "codex-mouse"
     trial.mkdir()
     schema = trial / "answer.schema.json"
     schema.write_text(json.dumps({
-        "type": "object", "properties": {"event": {"type": "string"}, "initial_left": {"type": "string"}, "next_input": {"type": "string"}, "centered": {"type": "boolean"}, "observation": {"type": "string"}},
-        "required": ["event", "initial_left", "next_input", "centered", "observation"], "additionalProperties": False,
+        "type": "object", "properties": {k: {"type": t} for k, t in fields.items()},
+        "required": list(fields), "additionalProperties": False,
     }))
     with tempfile.TemporaryDirectory(prefix="mc-codex-docs-") as directory:
         runner = Path(directory)
@@ -128,9 +127,44 @@ def exercise_codex(work, env, binary):
             "-c", 'mcp_servers.minecraft.tools.inspect_input.approval_mode="approve"',
             "-c", 'mcp_servers.minecraft.tools.cursor_hint.approval_mode="approve"',
             "-c", 'mcp_servers.minecraft.tools.input_script.approval_mode="approve"',
-            "--output-schema", str(schema), "--json", "-o", str(trial / "answer.json"), PROMPT,
+            "--output-schema", str(schema), "--json", "-o", str(trial / "answer.json"), prompt,
         ]
         with (trial / "events.jsonl").open("w") as out, (trial / "stderr.log").open("w") as err:
             subprocess.run(args, env=env, cwd=runner, stdin=subprocess.DEVNULL,
                            stdout=out, stderr=err, timeout=240, check=True)
-        verify_session(trial, pages)
+    return pages
+
+
+def exercise_codex(work, env, binary):
+    trial = work / "codex-mouse"
+    pages = run_codex(trial, env, binary, PROMPT, {
+        "event": "string", "initial_left": "string", "next_input": "string",
+        "centered": "boolean", "observation": "string",
+    })
+    verify_session(trial, pages)
+
+
+def exercise_collision_codex(work, env):
+    trial = work / "codex-collision"
+    binary = Path(__file__).resolve().parents[2] / "target/debug/minecraft-mcp"
+    prompt = """游戏角色面朝世界 +Z 方向，前方有一堵墙。请用 minecraft MCP 编写输入脚本向前走，
+在首次撞到 Z 方向的墙时通过事件暂停并观察停止帧。用工具实际返回的数据填写 event 和 ticks。
+脚本语法可用 cat 阅读 docs/input-script/ 下的文档。"""
+    run_codex(trial, env, binary, prompt, {"event": "string", "ticks": "integer"})
+    stops = []
+    for line in (trial / "events.jsonl").read_text().splitlines():
+        item = json.loads(line).get("item", {})
+        if item.get("server") != "minecraft" or item.get("tool") != "input_script" or item.get("status") != "completed":
+            continue
+        result = item.get("result") or {}
+        if result.get("isError"):
+            continue
+        content = result["content"]
+        status = json.loads(content[0]["text"])
+        names = [origin["event"] for origin in status.get("pause_listeners", [])]
+        if status.get("pause_reason") == "pause" and names == ["CollideZ"]:
+            assert len(content) == 2 and content[1]["type"] == "image" and status["world"] == "paused"
+            stops.append(status["ticks"])
+    answer = json.loads((trial / "answer.json").read_text())
+    assert answer["event"] == "CollideZ" and answer["ticks"] > 0 and answer["ticks"] in stops, answer
+    print(f"PASS: Codex paused on {answer['event']} at tick {answer['ticks']} and received the frame.", flush=True)

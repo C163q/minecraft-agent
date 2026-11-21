@@ -2,7 +2,7 @@
 import json
 
 
-def exercise_events(work, log, play, rpc, block, inspect):
+def exercise_events(work, log, play, rpc, block, inspect, codex_env=None):
     def send(lines, ticks=None, name="event-status", image=False):
         return play(dict(block(*lines), include_screenshot=image), ticks, name)
 
@@ -126,10 +126,35 @@ def exercise_events(work, log, play, rpc, block, inspect):
     response = send([*handler("HpLost", "PAUSE"), "Wait(20)"])
     assert response["pause_reason"] == "end" and not origins(response), response
     assert "AGENT_RESPAWN" in log.read_text()
+    from player_events import exercise_player_events
+    exercise_player_events(work, log, send, hit, handler, inspect, codex_env)
     hit("change-level")
     moved = rpc("tools/call", {"name": "input_script", "arguments":
                 dict(block(*handler("Hurt", "Key(s)"), "Wait(200)"), include_screenshot=False)})
     assert moved.get("isError") and "world changed" in moved["content"][0]["text"], moved
     fresh = inspect()
     assert not fresh["listeners"] and fresh["queue"]["total"] == 0, fresh
+    # The death packet belongs to the Nether; immediate respawn replaces the client level.
+    send(["Wait(35)"], 35)
+    hit("lethal-immediate")
+    response = send([*handler("Death", "PAUSE", "Key(s)"), "Wait(100)"],
+                    name="cross-dimension-death", image=True)
+    assert origins(response) == ["Death"] and response["world"] == "paused", response
+    send(["Wait(1)"], 1)
+    assert inspect()["held"]["keys"] == {"s": "temporary"}
+    assert inspect()["listeners"] == [] and inspect()["queue"]["total"] == 0
+    # A later tool call must never finish against a handler belonging to the earlier death.
+    hit("change-level")
+    moved = rpc("tools/call", {"name": "input_script", "arguments":
+                dict(block("Wait(200)"), include_screenshot=False)})
+    assert moved.get("isError") and "world changed" in moved["content"][0]["text"], moved
+    send(["Wait(35)"], 35)
+    hit("lethal-screen")
+    stopped = send([*handler("Death", "PAUSE", "Wait(80)"), "Wait(200)"])
+    assert origins(stopped) == ["Death"]
+    (work / "respawn-after-resume").touch()
+    moved = rpc("tools/call", {"name": "input_script", "arguments":
+                dict(block("Wait(40)"), include_screenshot=False)})
+    assert moved.get("isError") and "world changed" in moved["content"][0]["text"], moved
+    assert inspect()["queue"]["total"] == 0
     print("PASS: event offsets, repeated observations, listener origins, golden hearts, shield, cooldown and explicit PNGs.")

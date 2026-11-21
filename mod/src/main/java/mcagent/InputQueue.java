@@ -97,7 +97,7 @@ final class InputQueue {
     static final class Block {
         final ArrayDeque<Run> runs = new ArrayDeque<>();
         final Set<String> legacyFinal;
-        long id, remaining;
+        long id, remaining, observation;
         Listener listener;
         boolean onlyClearsListeners;
 
@@ -133,18 +133,38 @@ final class InputQueue {
     private List<Origin> pauseListeners = List.of();
     private final List<Path> screenshots = new ArrayList<>();
 
-    void observe(String event) {
+    // Use the first handler block ID to identify all handlers of one observed notification.
+    // Zero denotes a notification for which no listener was eligible.
+    long observe(String event) {
+        long observation = 0;
         for (var listener : listeners) {
             if (!listener.handling && listener.origin.event.equals(event)) {
                 listener.handling = true;
                 var block = new Block(null);
                 block.id = ++lastId;
+                if (observation == 0) observation = block.id;
+                block.observation = observation;
                 block.listener = listener;
                 block.runs.addAll(listener.body);
                 block.loadRemaining();
                 pending.add(block);
             }
         }
+        return observation;
+    }
+
+    boolean hasObservation(long observation) {
+        return pending.stream().anyMatch(b -> b.observation == observation)
+            || blocks.stream().anyMatch(b -> b.observation == observation);
+    }
+
+    /** A respawn may replace the dimension before this death can finish dispatching. */
+    void retainObservation(long observation) {
+        blocks.removeIf(b -> b.observation != observation);
+        pending.removeIf(b -> b.observation != observation);
+        listeners.clear();
+        persistent.clear();
+        foreground = null;
     }
 
     boolean hasObserved() { return !pending.isEmpty(); }
