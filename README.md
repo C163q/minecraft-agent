@@ -37,6 +37,8 @@ printf 'MINECRAFT_AGENT_SOCKET=%s\n' "$socket_path"
 
 将最后一行命令**输出的整行**（例如 `MINECRAFT_AGENT_SOCKET=/run/user/1000/minecraft-agent.sock`）填入 HMCL **目标实例的设置 → 高级选项 → 环境变量**。对此项使用实例自己的设置，保留原有环境变量，然后启动或重启该实例。
 
+如果通过脚本或编辑器修改了 HMCL 的实例配置文件，先保存并退出游戏，再完全退出 HMCL（包括托盘）并重新打开。一直开着的启动器可能仍会用内存中的旧设置启动游戏。
+
 进入单人世界后，从项目目录打开新的 Codex 会话，输入：
 
 > 请调用 minecraft 的 input_script，传入 `{"script":"BEGIN\nEND"}`，告诉我停止画面里有什么。

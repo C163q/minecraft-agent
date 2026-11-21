@@ -92,7 +92,15 @@ fn check_game_support(program: &DispatchProgram, hello: &Value) -> Result<()> {
 fn connect_game(call: &Mutex<Call>) -> Result<(BufReader<UnixStream>, Value)> {
     let path = env::var_os("MINECRAFT_AGENT_SOCKET")
         .ok_or("set MINECRAFT_AGENT_SOCKET to the game socket path")?;
-    let socket = UnixStream::connect(path)?;
+    let path = Path::new(&path);
+    let socket = UnixStream::connect(path).map_err(|error| {
+        let hint = if error.kind() == io::ErrorKind::NotFound {
+            "; check that Minecraft is running and its log shows 'Input bridge listening on' at this path"
+        } else {
+            ""
+        };
+        format!("cannot connect to Minecraft game socket {}: {error}{hint}", path.display())
+    })?;
     {
         let mut state = call.lock().unwrap();
         if state.cancelled {
