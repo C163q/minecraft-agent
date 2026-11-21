@@ -4,7 +4,7 @@
 
 ## Rust 脚本库
 
-`minecraft-input` 在仓库根目录构建，无第三方依赖。用户和 LLM 使用[脚本语法参考](../input-script.md)。`Script::parse` 验证内联文本，`ScriptSource::load` 统一处理文本和文件，文件的相对路径基准由调用方传入。入口见[解析器](../../src/parser.rs)。
+`minecraft-input` 在仓库根目录构建，无第三方依赖。用户和 LLM 使用[脚本语法参考](../input-script/README.md)。`Script::parse` 验证内联文本，`ScriptSource::load` 统一处理文本和文件，文件的相对路径基准由调用方传入。入口见[解析器](../../src/parser.rs)。
 
 每个游戏会话复用一个 [Keyboard](../../src/keyboard.rs)。`play(&script)` 返回惰性迭代器，每次取下一项才推进一个输入 tick，得到源行号、本拍按下、释放和保持的键集合。暂停后继续同一段时保留迭代器；进入下一段时复用键盘状态。将这些集合派发给 Fabric Mod 的游戏线程是后续接入工作。
 

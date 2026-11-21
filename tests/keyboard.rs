@@ -116,16 +116,20 @@ fn both_sources_produce_the_same_sequence() {
 
 #[test]
 fn published_examples_match_the_documented_held_keys() {
-    let reference = include_str!("../docs/input-script.md");
-    let examples: Vec<_> = reference
-        .split("```text\n")
-        .skip(1)
+    let references = [
+        include_str!("../docs/input-script/timing.md"),
+        include_str!("../docs/input-script/keyboard.md"),
+    ];
+    let examples: Vec<_> = references
+        .iter()
+        .flat_map(|page| page.split("```text\n").skip(1))
         .map(|example| example.split_once("\n```").unwrap().0)
         .collect();
     let expected: &[&[&[&str]]] = &[
         &[&["w"], &["w", "space"], &[], &[], &["a"]],
         &[&["w"], &[]],
         &[&["w"], &["w"], &["w"], &["w"], &["w"], &["w"], &["w"], &[]],
+        &[&["space"], &[]],
     ];
     assert_eq!(examples.len(), expected.len());
     for (text, ticks) in examples.into_iter().zip(expected) {
