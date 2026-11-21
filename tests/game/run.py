@@ -16,6 +16,20 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(root / "mod"))
 from build import build_jar, game_classpath
 from mouse import exercise_mouse
+from PIL import Image
+
+
+def has_pause_icon(path):
+    with Image.open(path) as image:
+        for scale in range(1, 9):
+            def rgb(x, y):
+                return image.getpixel(((4 + x) * scale, (4 + y) * scale))[:3]
+
+            bars = [rgb(x, y) for x in (5, 10) for y in (5, 8, 10)]
+            backdrop = [rgb(8, y) for y in (3, 7, 12)]
+            if all(min(pixel) > 220 for pixel in bars) and all(max(pixel) < 145 for pixel in backdrop):
+                return True
+    return False
 
 
 def exercise(client, work, log, codex_env):
@@ -52,7 +66,9 @@ def exercise(client, work, log, codex_env):
         assert status["screenshot_id"] and status["width"] > 0 and status["height"] > 0, status
         png = base64.b64decode(image["data"], validate=True)
         assert png.startswith(b"\x89PNG\r\n\x1a\n") and image["mimeType"] == "image/png"
-        (work / f"{name}.png").write_bytes(png)
+        path = work / f"{name}.png"
+        path.write_bytes(png)
+        assert has_pause_icon(path) == (world == "paused"), f"unexpected pause indicator in {path}"
         return status
 
     def block(*lines):
@@ -172,6 +188,7 @@ def exercise(client, work, log, codex_env):
     assert buttons == ["2 1", "2 0"], buttons
     samples, events = trace(offset)
     assert samples[-1] == "000" and events == ["26 1", "26 0"], (samples, events)
+    assert not has_pause_icon(work / "resumed.png"), "pause indicator persisted after resuming"
     print("PASS: eight ticks, handoff, remapping, invalid input, native pause, catch-up ticks, cancellation and END images.")
 
 

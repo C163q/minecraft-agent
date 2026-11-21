@@ -21,6 +21,7 @@ public final class Playback {
     private ClientLevel level;
     private Request active;
     private boolean freeze;
+    private boolean pauseConfirmed;
     private static final double DEFAULT_MAX_SPEED = 50;
     private double maxSpeed = DEFAULT_MAX_SPEED;
     private final AtomicReference<Fence> fence = new AtomicReference<>();
@@ -105,11 +106,16 @@ public final class Playback {
         maxSpeed = requestedCap;
         active = request;
         freeze = false;
+        pauseConfirmed = false;
         resolveControls(mc, request);
         return request.result;
     }
 
     public boolean frozen() { return freeze; }
+    public boolean showPauseIndicator(Minecraft mc) {
+        return pauseConfirmed && freeze && level == mc.level && mc.isPaused();
+    }
+
     public boolean keyDown(int code) { return keys.isDown(code); }
 
     public void checkContext(Minecraft mc) {
@@ -128,6 +134,7 @@ public final class Playback {
         var old = active;
         active = null;
         freeze = false;
+        pauseConfirmed = false;
         fence.set(null);
         persistent = Set.of();
         mouse.reset(mc, keys.modifiers());
@@ -198,7 +205,10 @@ public final class Playback {
     }
 
     public void marker(int id) {
-        if (active != null && active.ended && nextMarker == id) active.renderReady = true;
+        if (active != null && active.ended && nextMarker == id) {
+            pauseConfirmed = freeze;
+            active.renderReady = true;
+        }
     }
 
     public void afterRender(Minecraft mc) {

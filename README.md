@@ -1,6 +1,6 @@
 # Minecraft Agent
 
-通过 Rust MCP 和 Fabric Mod，让 LLM 根据 Minecraft Java Edition 的游戏画面操作键盘和鼠标。Linux 上的 `input_script` 读取脚本文本或 UTF-8 文件，逐拍执行输入，返回世界暂停状态与 PNG 截图。`inspect_input` 可查询仍按住的键、按钮和未完成的移动。`cursor_hint` 可以在截图上标点，并给出第一人称瞄准所需的转角。支持本机未向局域网开放的单人游戏。
+通过 Rust MCP 和 Fabric Mod，让 LLM 根据 Minecraft Java Edition 的游戏画面操作键盘和鼠标。Linux 上的 `input_script` 读取脚本文本或 UTF-8 文件，逐拍执行输入，返回世界暂停状态与 PNG 截图。`inspect_input` 可查询仍按住的键、按钮和未完成的移动。`cursor_hint` 可以在截图上标点，并给出第一人称瞄准所需的转角。Mod 确认世界暂停后，游戏画面左上角会显示双竖线图标，继续运行时图标消失。支持本机未向局域网开放的单人游戏。
 
 ## 使用入口
 
