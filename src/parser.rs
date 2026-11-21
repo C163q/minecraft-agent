@@ -137,6 +137,8 @@ pub(crate) struct Row {
     pub buttons: Keys,
     pub wait_mouse: bool,
     pub clear: bool,
+    pub pause: bool,
+    pub input_source: String,
 }
 
 impl Row {
@@ -154,6 +156,13 @@ impl Row {
             row.clear = true;
             return Ok(row);
         }
+        if let Some(before) = code.strip_suffix("PAUSE")
+            && (before.is_empty() || before.ends_with(|c: char| c.is_ascii_whitespace()))
+        {
+            row.pause = true;
+            code = before.trim_ascii_end();
+        }
+        let mut input_source = code;
         let mut first = true;
         while !code.is_empty() {
             let (name, arg, rest) = next_command(code)?;
@@ -162,6 +171,7 @@ impl Row {
                     return Err(format!("{name} must be the first command on its line"));
                 }
                 "Wait" => {
+                    input_source = rest;
                     row.wait = arg
                         .parse::<u64>()
                         .ok()
@@ -171,6 +181,7 @@ impl Row {
                         })?;
                 }
                 "WaitMouseMove" => {
+                    input_source = rest;
                     if !arg.trim().is_empty() {
                         return Err("WaitMouseMove expects no arguments".into());
                     }
@@ -204,6 +215,7 @@ impl Row {
             code = rest;
             first = false;
         }
+        row.input_source = input_source.to_owned();
         Ok(row)
     }
 }

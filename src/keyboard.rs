@@ -67,6 +67,9 @@ impl Keyboard {
 /// A fixed input run or a zero-tick control operation for game-side evaluation.
 #[derive(Default, Debug)]
 pub struct KeyRun {
+    pub key_actions: BTreeMap<String, &'static str>,
+    pub source: String,
+    pub pause: bool,
     pub moves: Vec<serde_json::Value>,
     pub buttons: BTreeMap<String, &'static str>,
     pub wait_mouse: bool,
@@ -81,6 +84,20 @@ pub struct DispatchProgram {
     pub persistent: BTreeSet<String>,
     /// Includes release-only names, so all bindings can be validated before playback.
     pub keys: BTreeMap<String, usize>,
+}
+
+fn wire_actions(actions: &Keys) -> BTreeMap<String, &'static str> {
+    actions
+        .iter()
+        .map(|(name, action)| {
+            let value = match action {
+                KeyAction::Temporary => "temporary",
+                KeyAction::Press => "press",
+                KeyAction::Release => "release",
+            };
+            (name.clone(), value)
+        })
+        .collect()
 }
 
 impl Script {
@@ -98,6 +115,13 @@ impl Script {
             if row.wait > 0 || row.wait_mouse || row.clear {
                 runs.push(KeyRun {
                     line: row.line,
+                    source: if row.clear {
+                        "CLEAR".into()
+                    } else if row.wait_mouse {
+                        "WaitMouseMove()".into()
+                    } else {
+                        format!("Wait({})", row.wait)
+                    },
                     ticks: row.wait,
                     held: keyboard.persistent.clone(),
                     wait_mouse: row.wait_mouse,
@@ -110,19 +134,18 @@ impl Script {
                     line: row.line,
                     ticks: 1,
                     held: keyboard.step(row.line, Some(&row.keys)).held,
+                    source: row.input_source.clone(),
                     moves: row.moves.clone(),
-                    buttons: row
-                        .buttons
-                        .iter()
-                        .map(|(button, action)| {
-                            let kind = match action {
-                                KeyAction::Temporary => "temporary",
-                                KeyAction::Press => "press",
-                                KeyAction::Release => "release",
-                            };
-                            (button.clone(), kind)
-                        })
-                        .collect(),
+                    buttons: wire_actions(&row.buttons),
+                    key_actions: wire_actions(&row.keys),
+                    ..KeyRun::default()
+                });
+            }
+            if row.pause {
+                runs.push(KeyRun {
+                    line: row.line,
+                    source: "PAUSE".into(),
+                    pause: true,
                     ..KeyRun::default()
                 });
             }

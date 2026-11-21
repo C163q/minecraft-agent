@@ -144,3 +144,40 @@ fn published_examples_match_the_documented_held_keys() {
         );
     }
 }
+
+#[test]
+fn pause_after_wait_or_input_takes_no_additional_tick() {
+    let script = Script::parse(
+        "BEGIN\nPAUSE\nWait(5) PAUSE\nWait(1) KeyRelease(w) KeyPress(a) Key(d) PAUSE\nEND",
+    )
+    .unwrap();
+    let program = script.compile(BTreeSet::new());
+    assert_eq!(
+        program
+            .runs
+            .iter()
+            .map(|r| (r.line, r.ticks))
+            .collect::<Vec<_>>(),
+        [(2, 0), (3, 5), (3, 0), (4, 1), (4, 1), (4, 0)]
+    );
+    assert_eq!(Keyboard::default().play(&script).count(), 7);
+}
+
+#[test]
+fn pause_must_end_its_line_and_clear_stands_alone() {
+    for body in [
+        "PAUSE Key(w)",
+        "PAUSE PAUSE",
+        "Key(w)PAUSE",
+        "CLEAR PAUSE",
+        "Pause",
+        "PAUSE()",
+    ] {
+        assert_eq!(
+            Script::parse(&format!("BEGIN\n{body}\nEND"))
+                .unwrap_err()
+                .line,
+            2
+        );
+    }
+}

@@ -1,6 +1,8 @@
 //! Local stdio MCP adapter. Each submission gets a fresh, serialized game session snapshot.
 #[path = "minecraft-mcp/hints.rs"]
 mod hints;
+#[path = "minecraft-mcp/queue.rs"]
+mod queue;
 
 use minecraft_input::{DispatchProgram, ScriptSource};
 use serde_json::{Value, json};
@@ -85,29 +87,58 @@ fn connect_game(call: &Mutex<Call>) -> Result<(BufReader<UnixStream>, Value)> {
 }
 
 fn inspect(args: Option<&Value>, call: &Mutex<Call>) -> Result<Value> {
-    if args.is_some_and(|v| !v.as_object().is_some_and(|o| o.is_empty())) {
-        return Err("inspect_input accepts no arguments".into());
-    }
+    let state = queue::inspect(args, || inspect_game(call))?;
+    Ok(json!({"structuredContent":state,"content":[{"type":"text","text":state.to_string()}]}))
+}
+
+fn inspect_game(call: &Mutex<Call>) -> Result<Value> {
     let (mut reader, hello) = connect_game(call)?;
     if hello["inspect_input"] != true {
         return Err(
             "installed Fabric mod lacks inspect_input; update the mod and restart Minecraft".into(),
         );
     }
-    reader
-        .get_mut()
-        .write_all(b"{\"op\":\"inspect_input\"}\n")?;
+    let queue_supported = hello["pause_queue"] == true;
+    let mut request = json!({"op":"inspect_input"});
+    if queue_supported {
+        request["queue_version"] = json!(1);
+    }
+    serde_json::to_writer(reader.get_mut(), &request)?;
+    reader.get_mut().write_all(b"\n")?;
     let state = receive(&mut reader)?;
-    Ok(json!({"structuredContent":state,"content":[{"type":"text","text":state.to_string()}]}))
+    if queue_supported && !state["queue_entries"].is_array() {
+        return Err("game did not return a queue snapshot".into());
+    }
+    Ok(state)
 }
 
-fn inspect_tool() -> Value {
-    json!({
-        "name": "inspect_input",
-        "description": "Inspect current script-held keys, mouse buttons and unfinished mouse movements without advancing input. See docs/input-script/inspect.md.",
-        "inputSchema": {"type":"object", "properties":{}, "additionalProperties":false},
-        "annotations": {"readOnlyHint":true}
-    })
+fn encode_program(program: DispatchProgram, hello: &Value, max_speed: f64) -> Result<Value> {
+    check_game_support(&program, hello)?;
+    let queue_supported = hello["pause_queue"] == true;
+    if !queue_supported && program.runs.iter().any(|r| r.pause) {
+        return Err("PAUSE requires the pause_queue Fabric mod update; update the mod and restart Minecraft".into());
+    }
+    let runs: Vec<_> = program
+        .runs
+        .into_iter()
+        .map(|r| {
+            let mut run = json!({
+                "line":r.line, "ticks":r.ticks.to_string(), "held":r.held,
+                "moves":r.moves, "buttons":r.buttons, "wait_mouse":r.wait_mouse, "clear":r.clear
+            });
+            if queue_supported {
+                run["key_actions"] = json!(r.key_actions);
+                run["source"] = json!(r.source);
+                run["pause"] = json!(r.pause);
+            }
+            run
+        })
+        .collect();
+    let mut request = json!({"keys":program.keys,"runs":runs,"persistent":program.persistent,"max_speed":max_speed});
+    if queue_supported {
+        request["queue_version"] = json!(1);
+    }
+    Ok(request)
 }
 
 fn play(args: &Value, call: &Mutex<Call>) -> Result<Value> {
@@ -128,29 +159,19 @@ fn play(args: &Value, call: &Mutex<Call>) -> Result<Value> {
     let (mut reader, hello) = connect_game(call)?;
     let persistent: BTreeSet<String> = serde_json::from_value(hello["persistent"].clone())?;
     let program = script.compile(persistent);
-    check_game_support(&program, &hello)?;
-    let runs: Vec<_> = program
-        .runs
-        .into_iter()
-        .map(|r| {
-            json!({
-                "line":r.line, "ticks":r.ticks.to_string(), "held":r.held,
-                "moves":r.moves, "buttons":r.buttons, "wait_mouse":r.wait_mouse, "clear":r.clear
-            })
-        })
-        .collect();
-    serde_json::to_writer(
-        reader.get_mut(),
-        &json!({"keys":program.keys,"runs":runs,"persistent":program.persistent,"max_speed":max_speed}),
-    )?;
+    let request = encode_program(program, &hello, max_speed)?;
+    serde_json::to_writer(reader.get_mut(), &request)?;
     reader.get_mut().write_all(b"\n")?;
     let reply = receive(&mut reader)?;
     let data = reply["png"].as_str().ok_or("missing END image")?;
     let (screenshot_id, width, height) = hints::remember(&reply)?;
-    let status = json!({
+    let mut status = json!({
         "ticks": reply["ticks"], "world": reply["world"], "width": width, "height": height,
         "screenshot_id": screenshot_id
     });
+    if let Some(reason) = reply.get("pause_reason") {
+        status["pause_reason"] = reason.clone();
+    }
     Ok(
         json!({"content":[{"type":"text","text":status.to_string()},{"type":"image","mimeType":"image/png","data":data}]}),
     )
@@ -162,7 +183,7 @@ fn respond(request: &Value) -> Value {
             json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"minecraft-agent","version":env!("CARGO_PKG_VERSION")}})
         }
         Some("tools/list") => {
-            json!({"tools":[{"name":"input_script","description":"Run a keyboard and mouse input script from exactly one of script or path and observe the END frame. See docs/input-script/README.md.","inputSchema":{"type":"object","properties":{"script":{"type":"string"},"path":{"type":"string"}},"additionalProperties":false}},inspect_tool(),hints::tool()]})
+            json!({"tools":[{"name":"input_script","description":"Run a keyboard and mouse input script from exactly one of script or path and observe the frame at PAUSE, a pause shortcut, or END. See docs/input-script/README.md.","inputSchema":{"type":"object","properties":{"script":{"type":"string"},"path":{"type":"string"}},"additionalProperties":false}},queue::tool(),hints::tool()]})
         }
         Some("ping") => json!({}),
         method => {
@@ -249,6 +270,35 @@ fn main() -> io::Result<()> {
 mod tests {
     use super::*;
     use minecraft_input::Script;
+
+    #[test]
+    fn pause_wire_keeps_declarations_and_split_source_fragments() {
+        let script = Script::parse("BEGIN\nWait(17293822569102704640) KeyPress(w) KeyRelease(a) Key(d) Mouse(left) PAUSE // stop\nEND").unwrap();
+        let old = json!({"mouse_input":true});
+        assert!(encode_program(script.compile(BTreeSet::new()), &old, 50.).is_err());
+        let hello = json!({"pause_queue":true,"mouse_input":true});
+        let request = encode_program(script.compile(BTreeSet::new()), &hello, 50.).unwrap();
+        assert_eq!(request["queue_version"], 1);
+        let runs = request["runs"].as_array().unwrap();
+        assert_eq!(runs[0]["key_actions"], json!({}));
+        assert_eq!(runs[0]["source"], "Wait(17293822569102704640)");
+        assert_eq!(
+            runs[1]["source"],
+            "KeyPress(w) KeyRelease(a) Key(d) Mouse(left)"
+        );
+        assert_eq!(
+            runs[1]["key_actions"],
+            json!({"w":"press","a":"release","d":"temporary"})
+        );
+        assert_eq!(runs[1]["pause"], false);
+        assert_eq!(runs[2]["pause"], true);
+        assert_eq!(runs[2]["source"], "PAUSE");
+        assert_eq!(runs[2]["ticks"], "0");
+        let legacy = Script::parse("BEGIN\nKey(w)\nEND").unwrap();
+        let request = encode_program(legacy.compile(BTreeSet::new()), &old, 50.).unwrap();
+        assert!(request.get("queue_version").is_none());
+        assert_eq!(request["runs"][0]["held"], json!(["w"]));
+    }
 
     #[test]
     fn keyboard_only_mod_rejects_mouse_before_dispatch() {
