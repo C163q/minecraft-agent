@@ -2,6 +2,14 @@
 
 当前验证基线是本地单人 Minecraft Java Edition 26.3 和 Fabric Loader 0.20.1。本机安装位置见工作区的 `docs/local.md`。
 
+## Rust 脚本库
+
+`minecraft-input` 在仓库根目录构建，无第三方依赖。用户和 LLM 使用[脚本语法参考](../input-script.md)。`Script::parse` 验证内联文本，`ScriptSource::load` 统一处理文本和文件，文件的相对路径基准由调用方传入。入口见[解析器](../../src/parser.rs)。
+
+每个游戏会话复用一个 [Keyboard](../../src/keyboard.rs)。`play(&script)` 返回惰性迭代器，每次取下一项才推进一个输入 tick，得到源行号、本拍按下、释放和保持的键集合。暂停后继续同一段时保留迭代器；进入下一段时复用键盘状态。将这些集合派发给 Fabric Mod 的游戏线程是后续接入工作。
+
+在仓库根目录运行 `cargo test --offline` 验证语法、逐拍状态与示例。运行 `cargo clippy --offline --all-targets -- -D warnings` 检查代码。
+
 ## 核对游戏接口
 
 以目标实例的版本 JSON 确认 `mainClass`、Loader 和游戏要求的 Java 版本。26.3 的游戏 JAR 保留类与方法名称，可用 JDK 自带的 `javap` 核对签名和调用顺序。在 shell 中将 `MC_JAR` 设为目标客户端 JAR 的绝对路径后执行：

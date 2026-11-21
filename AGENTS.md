@@ -8,6 +8,8 @@
 - Codex 环境遵循 [Codex 环境约定](docs/ai/codex.md)，使用子代理时另读其中链接的模型选择约定。Cursor 环境参见 [Cursor 模型选择](docs/ai/cursor-model-selection.md)。
 - 开发与验证从[开发文档](docs/development/README.md)进入。本机路径和工具链记录在工作区的 `docs/local.md`。
 
+编写输入脚本时按需查阅[脚本语法参考](docs/input-script.md)。若参考文档不在当前上下文，先在项目中查找；找不到时请用户提供。
+
 ## 游戏验证
 
 - 核对目标实例的 Minecraft 和 Fabric Loader 版本，以该版本的游戏类和接口为依据。标明使用游戏字节码、独立探针或完整工具链取得的证据。

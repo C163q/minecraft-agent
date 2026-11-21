@@ -1,0 +1,142 @@
+use minecraft_input::{Keyboard, Script, ScriptSource};
+use std::{collections::BTreeSet, path::Path};
+
+fn keys(names: &[&str]) -> BTreeSet<String> {
+    names.iter().map(|name| name.to_string()).collect()
+}
+
+#[test]
+fn waits_expand_before_the_entire_chord() {
+    let script = Script::parse("BEGIN\nWait(1)\nWait(2) Key(w) Key(a)\nEND\n").unwrap();
+    let frames: Vec<_> = Keyboard::default().play(&script).collect();
+    assert_eq!(frames.len(), 4);
+    assert!(frames[..3].iter().all(|frame| frame.held.is_empty()));
+    assert_eq!(frames[3].pressed, keys(&["w", "a"]));
+    assert_eq!(frames[3].held, frames[3].pressed);
+    assert_eq!(
+        frames.iter().map(|f| f.line).collect::<Vec<_>>(),
+        [2, 3, 3, 3]
+    );
+}
+
+#[test]
+fn raw_comments_blank_lines_and_crlf() {
+    let script = Script::parse(
+        "BEGIN // entry\r\nKey(w)\r\n// skip\r\nKey(w) // hold\r\n  // release\r\n\r\nEND\r\n",
+    )
+    .unwrap();
+    let f: Vec<_> = Keyboard::default().play(&script).collect();
+    assert_eq!(f.len(), 4);
+    assert_eq!(f[0].pressed, keys(&["w"]));
+    assert_eq!(f[1].held, keys(&["w"]));
+    assert!(f[1].pressed.is_empty() && f[1].released.is_empty());
+    assert_eq!(f[2].released, keys(&["w"]));
+    assert_eq!(f[2].line, 5);
+    assert!(f[3].held.is_empty() && f[3].released.is_empty());
+}
+
+#[test]
+fn explicit_hold_lasts_six_ticks() {
+    let script = Script::parse("BEGIN\nKeyPress(w)\nWait(5)\nKeyRelease(w)\nEND").unwrap();
+    let f: Vec<_> = Keyboard::default().play(&script).collect();
+    assert_eq!(f.len(), 7);
+    assert_eq!(f[0].pressed, keys(&["w"]));
+    assert!(
+        f[1..6]
+            .iter()
+            .all(|f| f.held == keys(&["w"]) && f.pressed.is_empty() && f.released.is_empty())
+    );
+    assert!(f[6].held.is_empty());
+    assert_eq!(f[6].released, keys(&["w"]));
+}
+
+#[test]
+fn transfer_to_persistent_hold_across_blocks_has_no_edges() {
+    let mut k = Keyboard::default();
+    let first = Script::parse("BEGIN\nKey(w) Key(a)\nEND").unwrap();
+    let second = Script::parse("BEGIN\nKeyPress(w)\nWait(1)\nKeyRelease(w)\nEND").unwrap();
+    assert_eq!(k.play(&first).count(), 1);
+    let f: Vec<_> = k.play(&second).collect();
+    assert_eq!(f[0].pressed, keys(&[]));
+    assert_eq!(f[0].released, keys(&["a"]));
+    assert_eq!(f[0].held, keys(&["w"]));
+    assert!(f[1].pressed.is_empty() && f[1].released.is_empty());
+    assert_eq!(f[2].released, keys(&["w"]));
+}
+
+#[test]
+fn very_long_wait_can_be_consumed_one_tick_at_a_time() {
+    let s = Script::parse("BEGIN\nWait(4294967296) Key(w)\nEND").unwrap();
+    assert!(
+        Keyboard::default()
+            .play(&s)
+            .take(2)
+            .all(|f| f.held.is_empty())
+    );
+}
+
+#[test]
+fn invalid_scripts_report_the_source_line() {
+    for (body, line) in [
+        ("Key(w)", 1),
+        ("BEGIN\nEND\nKey(w)", 3),
+        ("BEGIN\nKey(w)", 3),
+        ("BEGIN\nKey(w)\nBogus(a)\nEND", 3),
+        ("BEGIN\nBEGIN\nEND", 2),
+        ("BEGIN\nWait(0)\nEND", 2),
+        ("BEGIN\nWait(-1)\nEND", 2),
+        ("BEGIN\nKey(w) Wait(2)\nEND", 2),
+        ("BEGIN\nWait(1) Wait(2)\nEND", 2),
+        ("BEGIN\nKeyPress(a) KeyRelease(a)\nEND", 2),
+        ("BEGIN\nKey()\nEND", 2),
+    ] {
+        assert_eq!(Script::parse(body).unwrap_err().line, line, "{body:?}");
+    }
+}
+
+#[test]
+fn both_sources_produce_the_same_sequence() {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let file = ScriptSource::Path(Path::new("walk.input"))
+        .load(&base)
+        .unwrap();
+    let text = ScriptSource::Inline(include_str!("walk.input"))
+        .load(&base)
+        .unwrap();
+    assert_eq!(
+        Keyboard::default().play(&file).collect::<Vec<_>>(),
+        Keyboard::default().play(&text).collect::<Vec<_>>()
+    );
+    assert!(
+        ScriptSource::Path(Path::new("missing.input"))
+            .load(&base)
+            .is_err()
+    );
+}
+
+#[test]
+fn published_examples_match_the_documented_held_keys() {
+    let reference = include_str!("../docs/input-script.md");
+    let examples: Vec<_> = reference
+        .split("```text\n")
+        .skip(1)
+        .map(|example| example.split_once("\n```").unwrap().0)
+        .collect();
+    let expected: &[&[&[&str]]] = &[
+        &[&["w"], &["w", "space"], &[], &[], &["a"]],
+        &[&["w"], &[]],
+        &[&["w"], &["w"], &["w"], &["w"], &["w"], &["w"], &["w"], &[]],
+    ];
+    assert_eq!(examples.len(), expected.len());
+    for (text, ticks) in examples.into_iter().zip(expected) {
+        let script = Script::parse(text).unwrap();
+        let actual: Vec<_> = Keyboard::default()
+            .play(&script)
+            .map(|frame| frame.held)
+            .collect();
+        assert_eq!(
+            actual,
+            ticks.iter().map(|tick| keys(tick)).collect::<Vec<_>>()
+        );
+    }
+}

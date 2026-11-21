@@ -4,6 +4,7 @@
 
 | 位置 | 职责 |
 | --- | --- |
+| [脚本语法参考](input-script.md) | 供用户与 LLM 编写输入脚本时按需查阅 |
 | [项目协作约定](../AGENTS.md) | 开发阅读入口与游戏验证约定 |
 | [文档规范](documentation.md) | 文档读者、分类、命名及维护规则 |
 | `docs/ai/` | 对应 AI 开发环境的专项约定 |
@@ -25,6 +26,6 @@
 - [Codex 第一人称瞄准与持续挖掘](research/2026-11-21-first-person-mining.md)
 - [未完成的鼠标移动跨暂停续跑与清除](research/2026-11-21-buffered-mouse.md)
 
-## 设计草案
+## 设计记录
 
 - [input_script 的时间与键盘输入](superpowers/specs/2026-11-21-input-script-design.md)

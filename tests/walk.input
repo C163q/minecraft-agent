@@ -1,0 +1,6 @@
+BEGIN
+// Hold W for six ticks, then release.
+KeyPress(w)
+Wait(5)
+KeyRelease(w)
+END
