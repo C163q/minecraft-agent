@@ -143,38 +143,58 @@ fn encode_program(program: DispatchProgram, hello: &Value, max_speed: f64) -> Re
 
 fn play(args: &Value, call: &Mutex<Call>) -> Result<Value> {
     let args = args.as_object().ok_or("expected script or path")?;
-    if args.len() != 1 {
-        return Err("supply exactly one of script or path".into());
+    if args
+        .keys()
+        .any(|key| !matches!(key.as_str(), "script" | "path" | "include_screenshot"))
+    {
+        return Err("unknown input_script argument".into());
     }
-    let source = match (
-        args.get("script").and_then(Value::as_str),
-        args.get("path").and_then(Value::as_str),
-    ) {
-        (Some(text), None) => ScriptSource::Inline(text),
-        (None, Some(file)) => ScriptSource::Path(Path::new(file)),
-        _ => return Err("expected a string script or path".into()),
+    let include_screenshot = match args.get("include_screenshot") {
+        Some(value) => value
+            .as_bool()
+            .ok_or("include_screenshot must be a boolean")?,
+        None => true,
+    };
+    let source = match (args.get("script"), args.get("path")) {
+        (Some(Value::String(text)), None) => ScriptSource::Inline(text),
+        (None, Some(Value::String(file))) => ScriptSource::Path(Path::new(file)),
+        _ => return Err("supply exactly one of script or path as a string".into()),
     };
     let script = source.load(&env::current_dir()?)?;
     let max_speed = max_mouse_speed()?;
     let (mut reader, hello) = connect_game(call)?;
     let persistent: BTreeSet<String> = serde_json::from_value(hello["persistent"].clone())?;
     let program = script.compile(persistent);
-    let request = encode_program(program, &hello, max_speed)?;
+    let mut request = encode_program(program, &hello, max_speed)?;
+    if !include_screenshot {
+        request["include_screenshot"] = json!(false);
+    }
     serde_json::to_writer(reader.get_mut(), &request)?;
     reader.get_mut().write_all(b"\n")?;
-    let reply = receive(&mut reader)?;
-    let data = reply["png"].as_str().ok_or("missing END image")?;
-    let (screenshot_id, width, height) = hints::remember(&reply)?;
-    let mut status = json!({
-        "ticks": reply["ticks"], "world": reply["world"], "width": width, "height": height,
-        "screenshot_id": screenshot_id
-    });
+    stop_result(&receive(&mut reader)?, include_screenshot)
+}
+
+fn stop_result(reply: &Value, include_screenshot: bool) -> Result<Value> {
+    let ticks = reply["ticks"]
+        .as_u64()
+        .ok_or("missing or invalid stop tick count")?;
+    let world = reply["world"]
+        .as_str()
+        .ok_or("missing or invalid stop world state")?;
+    let mut status = json!({"ticks":ticks, "world":world});
     if let Some(reason) = reply.get("pause_reason") {
         status["pause_reason"] = reason.clone();
     }
-    Ok(
-        json!({"content":[{"type":"text","text":status.to_string()},{"type":"image","mimeType":"image/png","data":data}]}),
-    )
+    if !include_screenshot {
+        return Ok(json!({"content":[{"type":"text","text":status.to_string()}]}));
+    }
+    let data = reply["png"].as_str().ok_or("missing stop image")?;
+    let (screenshot_id, width, height) = hints::remember(reply)?;
+    status["screenshot_id"] = json!(screenshot_id);
+    status["width"] = json!(width);
+    status["height"] = json!(height);
+    Ok(json!({"content":[{"type":"text","text":status.to_string()},
+                         {"type":"image","mimeType":"image/png","data":data}]}))
 }
 
 fn respond(request: &Value) -> Value {
@@ -183,7 +203,7 @@ fn respond(request: &Value) -> Value {
             json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"minecraft-agent","version":env!("CARGO_PKG_VERSION")}})
         }
         Some("tools/list") => {
-            json!({"tools":[{"name":"input_script","description":"Run a keyboard and mouse input script from exactly one of script or path and observe the frame at PAUSE, a pause shortcut, or END. See docs/input-script/README.md.","inputSchema":{"type":"object","properties":{"script":{"type":"string"},"path":{"type":"string"}},"additionalProperties":false}},queue::tool(),hints::tool()]})
+            json!({"tools":[{"name":"input_script","description":"Run a keyboard and mouse input script from exactly one of script or path and return its stop status at PAUSE, a pause shortcut, or END. See docs/input-script/README.md.","inputSchema":{"type":"object","properties":{"script":{"type":"string"},"path":{"type":"string"},"include_screenshot":{"type":"boolean","default":true,"description":"Include the stopped frame as a PNG image."}},"additionalProperties":false}},queue::tool(),hints::tool()]})
         }
         Some("ping") => json!({}),
         method => {
@@ -270,6 +290,27 @@ fn main() -> io::Result<()> {
 mod tests {
     use super::*;
     use minecraft_input::Script;
+
+    #[test]
+    fn text_only_stop_requires_valid_status_and_skips_legacy_images() {
+        for reply in [
+            json!({}),
+            json!({"world":"paused","ticks":null}),
+            json!({"world":false,"ticks":0}),
+        ] {
+            assert!(stop_result(&reply, false).is_err());
+        }
+        let status = json!({"world":"paused","ticks":0,"pause_reason":"end"});
+        let mut legacy = status.clone();
+        legacy["png"] = json!("unused payload from an older mod");
+        for reply in [&status, &legacy] {
+            assert_eq!(
+                stop_result(reply, false).unwrap(),
+                json!({"content":[{"type":"text","text":status.to_string()}]})
+            );
+        }
+        assert!(stop_result(&status, true).is_err());
+    }
 
     #[test]
     fn pause_wire_keeps_declarations_and_split_source_fragments() {

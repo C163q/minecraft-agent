@@ -55,14 +55,22 @@ def exercise(client, work, log, codex_env):
     rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}})
     client.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
     client.stdin.flush()
-    assert {t["name"] for t in rpc("tools/list", {})["tools"]} == {"input_script", "cursor_hint", "inspect_input"}
+    tools = {t["name"]: t for t in rpc("tools/list", {})["tools"]}
+    assert set(tools) == {"input_script", "cursor_hint", "inspect_input"}
+    option = tools["input_script"]["inputSchema"]["properties"]["include_screenshot"]
+    assert option["type"] == "boolean" and option["default"] is True
 
     def play(args, expected_ticks, name, world="paused"):
         reply = rpc("tools/call", {"name": "input_script", "arguments": args})
         assert not reply.get("isError"), reply["content"][0]
-        status, image = reply["content"]
-        status = json.loads(status["text"])
+        blocks = reply["content"]
+        assert blocks[0]["type"] == "text"
+        status = json.loads(blocks[0]["text"])
         assert status["world"] == world and (expected_ticks is None or status["ticks"] == expected_ticks), status
+        if args.get("include_screenshot") is False:
+            assert len(blocks) == 1 and {"screenshot_id", "width", "height"}.isdisjoint(status), reply
+            return status
+        _, image = blocks
         assert status["screenshot_id"] and status["width"] > 0 and status["height"] > 0, status
         png = base64.b64decode(image["data"], validate=True)
         assert png.startswith(b"\x89PNG\r\n\x1a\n") and image["mimeType"] == "image/png"
@@ -88,6 +96,17 @@ def exercise(client, work, log, codex_env):
 
     assert inspect()["world"] == "unpaused"
     initial = play(block(), 0, "initial")
+    for invalid in (None, "false", 0):
+        rejected = rpc("tools/call", {"name": "input_script", "arguments": dict(block(), include_screenshot=invalid)})
+        assert rejected.get("isError") and "include_screenshot" in rejected["content"][0]["text"]
+    status = play(dict(block("Wait(1) PAUSE", "Wait(1)"), include_screenshot=False), 1, "text-only-pause")
+    assert status["pause_reason"] == "pause" and inspect()["queue"]["total"] == 1
+    (work / "text-only.input").write_text(block("Wait(1)")["script"])
+    status = play({"path": "text-only.input", "include_screenshot": False}, 1, "text-only-end")
+    assert status["pause_reason"] == "end" and inspect()["queue"]["total"] == 0
+    status = play(dict(block("Key(f8)", "Wait(1)"), include_screenshot=False), 1, "text-only-hotkey")
+    assert status["pause_reason"] == "hotkey"
+    initial = play(dict(block("Wait(1)"), include_screenshot=True), 1, "initial")
     if codex_env is not None:
         from codex_mouse import exercise_codex
         play(block("Mouse(left) PAUSE", "Wait(1)"), 1, "before-codex")

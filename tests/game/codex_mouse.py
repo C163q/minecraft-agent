@@ -12,7 +12,7 @@ from PIL import Image
 
 
 PROMPT = """只用 minecraft MCP 的游戏截图观察这个单人世界。让准星对准红色方块的中心。
-先调用 inspect_input，记录开始时脚本左键的保持方式，以及队列里首段的 source。然后观察，调用 cursor_hint 在你选的点标记并看图核对，再按返回的转角转动视角。
+先调用 inspect_input，记录开始时脚本左键的保持方式，以及队列里首段的 source。随后调用一次 input_script 做零拍观察，传 include_screenshot=false，只取状态。再用默认参数取得截图，调用 cursor_hint 在你选的点标记并看图核对，再按返回的转角转动视角。
 请保持站位不动，用停止帧检查最后准星是否在方块上；需要时可重新选点微调。
 脚本语法按需查阅，入口为 docs/input-script/README.md。读取资料时每次只执行 cat 加一个或多个文档相对路径；
 只从工具返回的图片判断游戏内容。最后返回 JSON，包含 initial_left（首次查询得到的左键保持方式）、next_input（待执行首段的 source）、centered（布尔值）与 observation（你看到的情况）。"""
@@ -39,7 +39,7 @@ def check_doc_command(command, docs):
 
 def verify_session(trial, docs):
     frames = {}
-    saw_inspect = saw_target_hint = saw_turn = False
+    saw_inspect = saw_text_only = saw_target_hint = saw_turn = False
     final = None
     count = 0
     with (trial / "events.jsonl").open() as events:
@@ -65,6 +65,12 @@ def verify_session(trial, docs):
                     assert state["pause_reason"] == "pause" and state["queue"]["entries"][0]["source"] == "Wait(1)"
                     saw_inspect = True
                 continue
+            if item["tool"] == "input_script" and item["arguments"].get("include_screenshot") is False:
+                text, = result["content"]
+                status = json.loads(text["text"])
+                assert text["type"] == "text" and status["world"] == "paused" and "screenshot_id" not in status
+                saw_text_only = True
+                continue
             text, image = result["content"]
             status = json.loads(text["text"])
             assert image["type"] == "image" and image["mimeType"] == "image/png"
@@ -89,7 +95,7 @@ def verify_session(trial, docs):
                 assert source.size == rgb.size and rgb.getpixel((x, y)) == (255, 0, 0)
                 if status.get("rotation") and red(source.getpixel((x, y))):
                     saw_target_hint = True
-    assert saw_inspect and saw_target_hint and saw_turn, "missing on-target hint or subsequent angular movement"
+    assert saw_inspect and saw_text_only and saw_target_hint and saw_turn, "missing on-target hint or subsequent angular movement"
     assert centered(final), "final frame missed the red landmark"
     answer = json.loads((trial / "answer.json").read_text())
     assert answer["initial_left"] == "temporary" and answer["next_input"] == "Wait(1)" and answer["centered"] is True and answer["observation"].strip(), answer

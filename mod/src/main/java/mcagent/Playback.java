@@ -34,7 +34,9 @@ public final class Playback {
     private int nextMarker = new Random().nextInt();
 
     record Snapshot(ClientLevel level, Set<String> persistent) {}
-    record Observation(long ticks, String world, String pauseReason, NativeImage image, FrameCamera.View camera) {}
+    record Observation(long ticks, String world, String pauseReason, NativeImage image, FrameCamera.View camera) implements AutoCloseable {
+        @Override public void close() { if (image != null) image.close(); }
+    }
     record Held(Map<String,String> keys, Map<String,String> buttons) {}
     record InputState(String world, Held held, List<Movement.Pending<?>> moves, double max_speed_px_per_tick,
                       String pause_reason, List<InputQueue.Entry> queue_entries) {}
@@ -42,8 +44,16 @@ public final class Playback {
     private record Fence(IntegratedServer server, int id) {}
     private static final class Request {
         final CompletableFuture<Observation> result = new CompletableFuture<>();
+        final boolean includeScreenshot;
         long executed;
         boolean renderReady;
+
+        Request(JsonObject program) {
+            var option = program.get("include_screenshot");
+            if (option != null && !(option.isJsonPrimitive() && option.getAsJsonPrimitive().isBoolean()))
+                throw new IllegalArgumentException("include_screenshot must be a boolean");
+            includeScreenshot = option == null || option.getAsBoolean();
+        }
     }
 
     private static boolean supports(Minecraft mc) {
@@ -82,10 +92,10 @@ public final class Playback {
         double cap = program.has("max_speed") ? program.get("max_speed").getAsDouble() : DEFAULT_MAX_SPEED;
         if (!Double.isFinite(cap) || cap <= 0) throw new IllegalArgumentException("max_speed must be finite and positive");
         var block = InputQueue.Block.read(program, resolved.keySet());
+        var request = new Request(program);
         queue.submit(block);
         codes.putAll(resolved);
         maxSpeed = cap;
-        var request = new Request();
         active = request;
         resume(mc);
         return request.result;
@@ -243,19 +253,24 @@ public final class Playback {
         r.renderReady = false;
         String world = worldState(mc);
         String reason = pauseReason;
+        if (!r.includeScreenshot) {
+            completeStop(mc, r, new Observation(r.executed, world, reason, null, null));
+            return;
+        }
         try {
             var camera = FrameCamera.snapshot(mc);
-            Screenshot.takeScreenshot(mc.gameRenderer.mainRenderTarget(), image -> {
-                mc.execute(() -> {
-                    if (active != r) { image.close(); return; }
-                    active = null;
-                    if (endInNativeMenu && world.equals("not_needed") && mc.gui.isPausing()) freeze = false;
-                    r.result.complete(new Observation(r.executed, world, reason, image, camera));
-                    if (resumeAfterCapture) resume(mc);
-                });
-            });
+            Screenshot.takeScreenshot(mc.gameRenderer.mainRenderTarget(), image ->
+                mc.execute(() -> completeStop(mc, r, new Observation(r.executed, world, reason, image, camera))));
         } catch (RuntimeException error) {
             reset(mc, "stop-frame capture failed: " + error.getMessage());
         }
+    }
+
+    private void completeStop(Minecraft mc, Request r, Observation observation) {
+        if (active != r) { observation.close(); return; }
+        active = null;
+        if (endInNativeMenu && observation.world().equals("not_needed") && mc.gui.isPausing()) freeze = false;
+        r.result.complete(observation);
+        if (resumeAfterCapture) resume(mc);
     }
 }

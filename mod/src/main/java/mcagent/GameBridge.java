@@ -106,7 +106,7 @@ public final class GameBridge implements ClientModInitializer {
                         if (peer.read(probe) != 0) throw new EOFException("client disconnected or sent a second submission");
                     } catch (IOException error) {
                         mc.submit(() -> engine.cancel(mc, result)).join();
-                        result.thenAccept(observation -> observation.image().close());
+                        result.thenAccept(Playback.Observation::close);
                         throw error;
                     }
                 }
@@ -115,13 +115,15 @@ public final class GameBridge implements ClientModInitializer {
             reply.addProperty("world", frame.world());
             reply.addProperty("ticks", frame.ticks());
             reply.addProperty("pause_reason", frame.pauseReason());
-            reply.add("camera", JSON.toJsonTree(frame.camera()));
             try (var image = frame.image()) {
-                var rgb = new BufferedImage(image.getWidth(), image.getHeight(), BufferedImage.TYPE_INT_RGB);
-                rgb.setRGB(0, 0, image.getWidth(), image.getHeight(), image.getPixels(), 0, image.getWidth());
-                var png = new ByteArrayOutputStream();
-                ImageIO.write(rgb, "PNG", png);
-                reply.addProperty("png", Base64.getEncoder().encodeToString(png.toByteArray()));
+                if (image != null) {
+                    reply.add("camera", JSON.toJsonTree(frame.camera()));
+                    var rgb = new BufferedImage(image.getWidth(), image.getHeight(), BufferedImage.TYPE_INT_RGB);
+                    rgb.setRGB(0, 0, image.getWidth(), image.getHeight(), image.getPixels(), 0, image.getWidth());
+                    var png = new ByteArrayOutputStream();
+                    ImageIO.write(rgb, "PNG", png);
+                    reply.addProperty("png", Base64.getEncoder().encodeToString(png.toByteArray()));
+                }
             }
             send(peer, reply);
         } catch (Exception e) {

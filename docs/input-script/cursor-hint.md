@@ -1,6 +1,6 @@
 # 根据截图标点与瞄准
 
-`input_script` 返回停止帧的 PNG、原始宽高和 `screenshot_id`。`cursor_hint` 在原图的副本上标红点和红环，返回带标记的 PNG、原始图像尺寸与所选像素。标点期间游戏保持原状态。
+`input_script` 默认返回停止帧的 PNG、原始宽高和 `screenshot_id`。`cursor_hint` 在原图的副本上标红点和红环，返回带标记的 PNG、原始图像尺寸与所选像素。标点期间游戏保持原状态。
 
 | 参数 | 填法 |
 | --- | --- |

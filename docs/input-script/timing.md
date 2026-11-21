@@ -42,3 +42,13 @@ END
 ## 脚本来源
 
 工具接受内联文本 `script` 或文件路径 `path`，每次选择一种。两种来源在 Rust 核心中共用同一解析器。脚本文件使用 UTF-8，保留空行和缩进，支持 LF 和 CRLF。使用文件时可传绝对路径；MCP 从自身进程的工作目录解析相对路径。
+
+## 停止时是否返回截图
+
+工具参数 `include_screenshot` 是可选布尔值，默认为 `true`，适用于 `script` 和 `path`。例如，只查询这次执行的停止状态：
+
+```json
+{"script":"BEGIN\nWait(5) PAUSE\nEND","include_screenshot":false}
+```
+
+到达 `PAUSE`、`END` 或被暂停快捷键打断时，这次调用只返回文本状态，包含 `ticks`、`world` 和 `pause_reason`。停止确认、输入队列和恢复规则与默认模式相同。需要看图时，在下一次调用省略此参数或传 `true`，即可取得 PNG、原图尺寸和供 `cursor_hint` 使用的 `screenshot_id`。
