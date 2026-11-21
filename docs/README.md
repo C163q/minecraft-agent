@@ -24,3 +24,7 @@
 - [Codex 在两种 GUI 缩放下看图取出钻石](research/2026-11-21-codex-gui-click.md)
 - [Codex 第一人称瞄准与持续挖掘](research/2026-11-21-first-person-mining.md)
 - [未完成的鼠标移动跨暂停续跑与清除](research/2026-11-21-buffered-mouse.md)
+
+## 设计草案
+
+- [input_script 的时间与键盘输入](superpowers/specs/2026-11-21-input-script-design.md)
