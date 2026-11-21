@@ -18,14 +18,16 @@ pub struct Keyboard {
 }
 
 impl Keyboard {
-    /// Each iterator step advances one input tick. END itself emits no frame.
+    /// Project the fixed ticks of a script onto the keyboard. Dynamic mouse waits
+    /// depend on game state; this keyboard-only preview treats them as already idle.
+    /// Game playback uses `Script::compile` to preserve those waits.
     pub fn play<'a>(&'a mut self, script: &'a Script) -> impl Iterator<Item = KeyFrame> + 'a {
         script
             .rows
             .iter()
             .flat_map(|row| {
                 let waiting = (0..row.wait).map(move |_| (row.line, None));
-                let input = (!row.keys.is_empty()).then_some((row.line, Some(&row.keys)));
+                let input = row.has_input().then_some((row.line, Some(&row.keys)));
                 waiting.chain(input)
             })
             .map(|(line, keys)| self.step(line, keys))
@@ -62,9 +64,13 @@ impl Keyboard {
     }
 }
 
-/// Repeated ticks with the same desired physical keyboard state.
-#[derive(Debug)]
+/// A fixed input run or a zero-tick control operation for game-side evaluation.
+#[derive(Default, Debug)]
 pub struct KeyRun {
+    pub moves: Vec<serde_json::Value>,
+    pub buttons: BTreeMap<String, &'static str>,
+    pub wait_mouse: bool,
+    pub clear: bool,
     pub line: usize,
     pub ticks: u64,
     pub held: BTreeSet<String>,
@@ -89,18 +95,35 @@ impl Script {
             for key in row.keys.keys() {
                 keys.entry(key.clone()).or_insert(row.line);
             }
-            if row.wait > 0 {
+            if row.wait > 0 || row.wait_mouse || row.clear {
                 runs.push(KeyRun {
                     line: row.line,
                     ticks: row.wait,
-                    held: keyboard.step(row.line, None).held,
+                    held: keyboard.persistent.clone(),
+                    wait_mouse: row.wait_mouse,
+                    clear: row.clear,
+                    ..KeyRun::default()
                 });
             }
-            if !row.keys.is_empty() {
+            if row.has_input() {
                 runs.push(KeyRun {
                     line: row.line,
                     ticks: 1,
                     held: keyboard.step(row.line, Some(&row.keys)).held,
+                    moves: row.moves.clone(),
+                    buttons: row
+                        .buttons
+                        .iter()
+                        .map(|(button, action)| {
+                            let kind = match action {
+                                KeyAction::Temporary => "temporary",
+                                KeyAction::Press => "press",
+                                KeyAction::Release => "release",
+                            };
+                            (button.clone(), kind)
+                        })
+                        .collect(),
+                    ..KeyRun::default()
                 });
             }
         }

@@ -1,4 +1,4 @@
-//! Parser and per-tick keyboard state for Minecraft input scripts.
+//! Parser, game dispatch program and keyboard preview for Minecraft input scripts.
 //!
 //! ```
 //! use minecraft_input::{Keyboard, Script};
