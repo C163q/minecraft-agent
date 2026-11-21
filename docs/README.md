@@ -19,3 +19,4 @@
 - [26.3 输入后端与 MCP 图片传输](research/2026-11-21-input-and-mcp.md)
 - [普通键盘输入与 END 的停止边界](research/2026-11-21-keyboard-tick.md)
 - [暂停确认、箱子状态同步与停止截图](research/2026-11-21-stop-frame.md)
+- [END 停止帧中的玩家红心和实体位置](research/2026-11-21-world-stop-frame.md)
