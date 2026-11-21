@@ -194,7 +194,63 @@ public final class InputQueueTest {
         }
     }
 
+    private static final String ACTION = """
+        {"line":5,"ticks":"1","held":[],"key_actions":{"s":"temporary"},"source":"Key(s)"}
+        """;
+    private static final String PAUSE = """
+        {"line":5,"ticks":"0","held":[],"pause":true,"source":"PAUSE"}
+        """;
+
+    void lastTickEvent(String body, String reason, int pending) {
+        queue.submit(wire("""
+            {"queue_version":1,"persistent":[],"runs":[
+                {"line":2,"ticks":"0","held":[],"event":"Hurt","body":[BODY]},
+                {"line":7,"ticks":"1","held":[],"key_actions":{"w":"temporary"}}]}
+            """.replace("BODY", body), "w", "s"));
+        equal(null, controls());
+        equal(Set.of("w"), queue.input().held());
+        queue.observe("Hurt");
+        queue.observe("Hurt");
+        queue.advance();
+        equal(reason, controls());
+        equal(pending, queue.inspect().size());
+        if (reason.equals("pause")) equal("Hurt", queue.pauseListeners().getFirst().event());
+        if (pending > 0) {
+            equal(null, controls());
+            equal(Set.of("s"), queue.input().held());
+            queue.advance();
+            equal(pending == 1 ? "end" : "pause", controls());
+        }
+    }
+
+    void observedBeforeDispatchMergesInRegistrationOrder() {
+        String runs = """
+            {"queue_version":1,"persistent":[],"runs":[
+              {"line":2,"ticks":"0","held":[],"event":"HpLost","body":[
+                 {"line":4,"ticks":"1","held":[],"key_actions":{"w":"release","s":"temporary"}}]},
+              {"line":6,"ticks":"0","held":[],"event":"Hurt","body":[
+                 {"line":8,"ticks":"1","held":[],"key_actions":{"w":"press"}}]},
+              {"line":10,"ticks":"1","held":[],"key_actions":{"a":"temporary","w":"temporary"}},
+              {"line":11,"ticks":"1","held":[]}]}
+            """;
+        queue.submit(wire(runs, "a", "w", "s"));
+        queue.observe("Hurt"); // Before registration.
+        equal(null, controls());
+        equal(2, queue.inspect().size());
+        queue.observe("Hurt");
+        queue.observe("HpLost");
+        equal(4, queue.inspect().size());
+        tick("a", "w", "s");
+        equal(Set.of("w"), queue.persistent());
+        equal("end", controls());
+        equal(2L, queue.listeners().stream().filter(l -> l.state().equals("ready")).count());
+    }
+
     public static void main(String[] args) {
+        new InputQueueTest().observedBeforeDispatchMergesInRegistrationOrder();
+        new InputQueueTest().lastTickEvent(ACTION, "end", 1);
+        new InputQueueTest().lastTickEvent(PAUSE, "pause", 0);
+        new InputQueueTest().lastTickEvent(ACTION + "," + PAUSE, "end", 2);
         new InputQueueTest().pauseAndOverlay();
         new InputQueueTest().clearAndCompactWait();
         new InputQueueTest().pausesAtEveryBoundary();
