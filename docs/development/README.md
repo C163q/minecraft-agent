@@ -25,3 +25,5 @@ javap -p -c -classpath "$MC_JAR" net.minecraft.client.server.IntegratedServer
 工具区分已暂停、未暂停、无需暂停。世界仍在模拟的背包、箱子和聊天界面适用上述暂停流程。标题页等无需暂停的场景通过客户端取得当前界面的新帧。同步标记覆盖同一连接上排在它之前的更新，屏幕内容仍遵循游戏自身的呈现与动画。箱子槽位的同步与截图证据见[停止画面调研](../research/2026-11-21-stop-frame.md)。
 
 在世界内同步生命值可让红心随新帧更新。实体移动还可能有等待后续客户端 tick 推进的位置插值，停止图中会保留玩家当时所见的位置。实测范围见[红心与实体停止帧](../research/2026-11-21-world-stop-frame.md)。
+
+通过 stdio 接入 Codex 时，最终截图可直接作为 MCP 工具结果的 `image` 内容块与暂停状态一同返回。模型可直接观察该图，详情见 [Codex 单图实机盲测](../research/2026-11-21-codex-image.md)。
