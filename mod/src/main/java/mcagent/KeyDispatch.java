@@ -53,10 +53,15 @@ final class KeyDispatch {
         for (int code : pressed) event(mc, code, true);
     }
 
-    private void event(Minecraft mc, int code, boolean press) {
-        if (press) held.add(code); else held.remove(code);
+    short modifiers() {
         short mods = SDLKeyboard.SDL_GetModState();
         for (int key : held) mods |= (short) modifier(key);
+        return mods;
+    }
+
+    private void event(Minecraft mc, int code, boolean press) {
+        if (press) held.add(code); else held.remove(code);
+        short mods = modifiers();
         int logical = SDLKeyboard.SDL_GetKeyFromScancode(code, mods, false);
         mc.keyboardHandler.keyPress(mc.getWindow().handle(), press ? InputConstants.PRESS : InputConstants.RELEASE,
             new KeyEvent(code, logical, mods));

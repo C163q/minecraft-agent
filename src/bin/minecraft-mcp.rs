@@ -1,5 +1,8 @@
 //! Local stdio MCP adapter. Each submission gets a fresh, serialized game session snapshot.
-use minecraft_input::ScriptSource;
+#[path = "minecraft-mcp/hints.rs"]
+mod hints;
+
+use minecraft_input::{DispatchProgram, ScriptSource};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
@@ -42,6 +45,29 @@ impl Call {
     }
 }
 
+fn max_mouse_speed() -> Result<f64> {
+    let speed = match env::var("MINECRAFT_AGENT_MOUSE_MAX_SPEED") {
+        Ok(value) => value.parse::<f64>()?,
+        Err(env::VarError::NotPresent) => 50.0,
+        Err(error) => return Err(error.into()),
+    };
+    if !speed.is_finite() || speed <= 0.0 {
+        return Err("MINECRAFT_AGENT_MOUSE_MAX_SPEED must be finite and positive".into());
+    }
+    Ok(speed)
+}
+
+fn check_game_support(program: &DispatchProgram, hello: &Value) -> Result<()> {
+    let needs_mouse = program
+        .runs
+        .iter()
+        .any(|r| r.wait_mouse || r.clear || !r.moves.is_empty() || !r.buttons.is_empty());
+    if needs_mouse && hello["mouse_input"] != true {
+        return Err("installed Fabric mod only supports keyboard input; update the mod and restart Minecraft".into());
+    }
+    Ok(())
+}
+
 fn play(args: &Value, call: &Mutex<Call>) -> Result<Value> {
     let args = args.as_object().ok_or("expected script or path")?;
     if args.len() != 1 {
@@ -56,6 +82,7 @@ fn play(args: &Value, call: &Mutex<Call>) -> Result<Value> {
         _ => return Err("expected a string script or path".into()),
     };
     let script = source.load(&env::current_dir()?)?;
+    let max_speed = max_mouse_speed()?;
     let path = env::var_os("MINECRAFT_AGENT_SOCKET")
         .ok_or("set MINECRAFT_AGENT_SOCKET to the game socket path")?;
     let mut socket = UnixStream::connect(path)?;
@@ -70,19 +97,29 @@ fn play(args: &Value, call: &Mutex<Call>) -> Result<Value> {
     let hello = receive(&mut reader)?;
     let persistent: BTreeSet<String> = serde_json::from_value(hello["persistent"].clone())?;
     let program = script.compile(persistent);
+    check_game_support(&program, &hello)?;
     let runs: Vec<_> = program
         .runs
         .into_iter()
-        .map(|r| json!({"line":r.line,"ticks":r.ticks.to_string(),"held":r.held}))
+        .map(|r| {
+            json!({
+                "line":r.line, "ticks":r.ticks.to_string(), "held":r.held,
+                "moves":r.moves, "buttons":r.buttons, "wait_mouse":r.wait_mouse, "clear":r.clear
+            })
+        })
         .collect();
     serde_json::to_writer(
         &mut socket,
-        &json!({"keys":program.keys,"runs":runs,"persistent":program.persistent}),
+        &json!({"keys":program.keys,"runs":runs,"persistent":program.persistent,"max_speed":max_speed}),
     )?;
     socket.write_all(b"\n")?;
     let reply = receive(&mut reader)?;
     let data = reply["png"].as_str().ok_or("missing END image")?;
-    let status = json!({"ticks":reply["ticks"],"world":reply["world"]});
+    let (screenshot_id, width, height) = hints::remember(&reply)?;
+    let status = json!({
+        "ticks": reply["ticks"], "world": reply["world"], "width": width, "height": height,
+        "screenshot_id": screenshot_id
+    });
     Ok(
         json!({"content":[{"type":"text","text":status.to_string()},{"type":"image","mimeType":"image/png","data":data}]}),
     )
@@ -94,7 +131,7 @@ fn respond(request: &Value) -> Value {
             json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"minecraft-agent","version":env!("CARGO_PKG_VERSION")}})
         }
         Some("tools/list") => {
-            json!({"tools":[{"name":"input_script","description":"Run a keyboard script from exactly one of script or path and observe the END frame. See docs/input-script/README.md.","inputSchema":{"type":"object","properties":{"script":{"type":"string"},"path":{"type":"string"}},"additionalProperties":false}}]})
+            json!({"tools":[{"name":"input_script","description":"Run a keyboard and mouse input script from exactly one of script or path and observe the END frame. See docs/input-script/README.md.","inputSchema":{"type":"object","properties":{"script":{"type":"string"},"path":{"type":"string"}},"additionalProperties":false}},hints::tool()]})
         }
         Some("ping") => json!({}),
         method => {
@@ -137,7 +174,8 @@ fn main() -> io::Result<()> {
             }
             continue;
         };
-        if method != Some("tools/call") || request["params"]["name"] != "input_script" {
+        let tool = request["params"]["name"].as_str();
+        if method != Some("tools/call") || !matches!(tool, Some("input_script" | "cursor_hint")) {
             send(&respond(&request))?;
             continue;
         }
@@ -146,7 +184,7 @@ fn main() -> io::Result<()> {
             let mut slot = pending.lock().unwrap();
             if slot.is_some() {
                 send(
-                    &json!({"jsonrpc":"2.0","id":id,"result":{"isError":true,"content":[{"type":"text","text":"keyboard submission in progress"}]}}),
+                    &json!({"jsonrpc":"2.0","id":id,"result":{"isError":true,"content":[{"type":"text","text":"tool call in progress"}]}}),
                 )?;
                 continue;
             }
@@ -154,7 +192,12 @@ fn main() -> io::Result<()> {
         }
         let slot = Arc::clone(&pending);
         thread::spawn(move || {
-            let result = play(&request["params"]["arguments"], &call).unwrap_or_else(
+            let args = &request["params"]["arguments"];
+            let result = match request["params"]["name"].as_str() {
+                Some("cursor_hint") => hints::annotate(args),
+                _ => play(args, &call),
+            }
+            .unwrap_or_else(
                 |e| json!({"isError":true,"content":[{"type":"text","text":e.to_string()}]}),
             );
             let mut guard = slot.lock().unwrap();
@@ -166,4 +209,28 @@ fn main() -> io::Result<()> {
         call.lock().unwrap().cancel();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use minecraft_input::Script;
+
+    #[test]
+    fn keyboard_only_mod_rejects_mouse_before_dispatch() {
+        let old = json!({"persistent":[]});
+        let updated = json!({"persistent":[],"mouse_input":true});
+        for (line, needs_mouse) in [
+            ("Key(w)", false),
+            ("Mouse(left)", true),
+            ("WaitMouseMove()", true),
+            ("CLEAR", true),
+            ("MouseMove(Px(1), Px(0))", true),
+        ] {
+            let script = Script::parse(&format!("BEGIN\n{line}\nEND")).unwrap();
+            let program = script.compile(BTreeSet::new());
+            assert_eq!(check_game_support(&program, &old).is_err(), needs_mouse);
+            assert!(check_game_support(&program, &updated).is_ok());
+        }
+    }
 }

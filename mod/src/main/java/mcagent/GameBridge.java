@@ -31,16 +31,16 @@ public final class GameBridge implements ClientModInitializer {
             listener.bind(UnixDomainSocketAddress.of(path));
             // A second instance that fails to bind must never remove this socket.
             path.toFile().deleteOnExit();
-            logger.info("Keyboard bridge listening on {}", path);
+            logger.info("Input bridge listening on {}", path);
             while (listener.isOpen()) {
                 try (var peer = listener.accept()) {
                     serve(peer);
                 } catch (Exception e) {
-                    logger.warn("Keyboard connection ended: {}", e.toString());
+                    logger.warn("Input connection ended: {}", e.toString());
                 }
             }
         } catch (IOException e) {
-            logger.error("Could not start keyboard bridge at {}", path, e);
+            logger.error("Could not start input bridge at {}", path, e);
         }
     }
 
@@ -68,7 +68,7 @@ public final class GameBridge implements ClientModInitializer {
             data.write(buf.array(), 0, count);
             buf.clear();
         }
-        throw new IOException("timed out receiving keyboard program");
+        throw new IOException("timed out receiving input program");
     }
 
     private static void serve(SocketChannel peer) throws Exception {
@@ -77,6 +77,7 @@ public final class GameBridge implements ClientModInitializer {
         try {
             var snapshot = mc.submit(() -> engine.snapshot(mc)).join();
             var hello = new JsonObject();
+            hello.addProperty("mouse_input", true);
             hello.add("persistent", JSON.toJsonTree(snapshot.persistent()));
             send(peer, hello);
             var program = readProgram(peer);
@@ -100,6 +101,7 @@ public final class GameBridge implements ClientModInitializer {
             var reply = new JsonObject();
             reply.addProperty("world", frame.world());
             reply.addProperty("ticks", frame.ticks());
+            reply.add("camera", JSON.toJsonTree(frame.camera()));
             try (var image = frame.image()) {
                 var rgb = new BufferedImage(image.getWidth(), image.getHeight(), BufferedImage.TYPE_INT_RGB);
                 rgb.setRGB(0, 0, image.getWidth(), image.getHeight(), image.getPixels(), 0, image.getWidth());

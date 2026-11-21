@@ -16,6 +16,7 @@ import net.minecraft.network.protocol.game.ClientboundSetHealthPacket;
 public final class Playback {
     public static final Playback INSTANCE = new Playback();
     private final KeyDispatch keys = new KeyDispatch();
+    private final MouseDispatch mouse = new MouseDispatch();
     private Set<String> persistent = Set.of();
     private ClientLevel level;
     private Request active;
@@ -24,13 +25,30 @@ public final class Playback {
     private int nextMarker = new Random().nextInt();
 
     record Snapshot(ClientLevel level, Set<String> persistent) {}
-    record Observation(long ticks, String world, NativeImage image) {}
-    private record Run(long ticks, Set<Integer> held) {}
+    record Observation(long ticks, String world, NativeImage image, FrameCamera.View camera) {}
+    private record Run(int line, long ticks, Set<Integer> held, MouseDispatch.Actions mouse,
+                       boolean waitMouse, boolean clear) {
+        static Run read(JsonObject run, Map<String,Integer> codes) {
+            int line = run.get("line").getAsInt();
+            long ticks = Long.parseUnsignedLong(run.get("ticks").getAsString());
+            boolean waitMouse = run.has("wait_mouse") && run.get("wait_mouse").getAsBoolean();
+            boolean clear = run.has("clear") && run.get("clear").getAsBoolean();
+            if ((ticks == 0) != (waitMouse || clear) || (waitMouse && clear))
+                throw new IllegalArgumentException("line " + line + ": invalid mouse control duration");
+            var target = new TreeSet<Integer>();
+            for (var key : run.getAsJsonArray("held")) target.add(Objects.requireNonNull(codes.get(key.getAsString())));
+            var mouse = MouseDispatch.Actions.read(run);
+            if (ticks != 1 && (!mouse.moves().isEmpty() || !mouse.buttons().isEmpty()))
+                throw new IllegalArgumentException("line " + line + ": mouse action needs one input tick");
+            return new Run(line, ticks, target, mouse, waitMouse, clear);
+        }
+    }
     private record Fence(IntegratedServer server, int id) {}
     private static final class Request {
         final ArrayDeque<Run> runs = new ArrayDeque<>();
         final CompletableFuture<Observation> result = new CompletableFuture<>();
         Set<String> persistent;
+        double maxSpeed;
         long remaining, executed;
         boolean inTick, ended, renderReady;
     }
@@ -58,14 +76,11 @@ public final class Playback {
         });
         for (var name : persistent) codes.computeIfAbsent(name, KeyDispatch::resolve);
         var request = new Request();
-        for (var item : program.getAsJsonArray("runs")) {
-            var run = item.getAsJsonObject();
-            long ticks = Long.parseUnsignedLong(run.get("ticks").getAsString());
-            if (ticks == 0) throw new IllegalArgumentException("zero length run");
-            var target = new TreeSet<Integer>();
-            for (var key : run.getAsJsonArray("held")) target.add(Objects.requireNonNull(codes.get(key.getAsString())));
-            request.runs.add(new Run(ticks, target));
-        }
+        request.maxSpeed = program.has("max_speed") ? program.get("max_speed").getAsDouble() : 50;
+        if (!Double.isFinite(request.maxSpeed) || request.maxSpeed <= 0)
+            throw new IllegalArgumentException("max_speed must be finite and positive");
+        for (var item : program.getAsJsonArray("runs"))
+            request.runs.add(Run.read(item.getAsJsonObject(), codes));
         var next = new TreeSet<String>();
         for (var key : program.getAsJsonArray("persistent")) {
             String name = key.getAsString();
@@ -75,7 +90,7 @@ public final class Playback {
         request.persistent = Set.copyOf(next);
         active = request;
         freeze = false;
-        if (request.runs.isEmpty()) finish(mc, request);
+        resolveControls(mc, request);
         return request.result;
     }
 
@@ -83,8 +98,8 @@ public final class Playback {
     public boolean keyDown(int code) { return keys.isDown(code); }
 
     public void checkContext(Minecraft mc) {
-        if (mc.level != level || ((freeze || active != null || !keys.isEmpty()) && !supports(mc))) {
-            reset(mc, "world changed during keyboard session");
+        if (mc.level != level || ((freeze || active != null || !keys.isEmpty() || mouse.active()) && !supports(mc))) {
+            reset(mc, "world changed during input session");
             level = mc.level;
         }
     }
@@ -99,6 +114,7 @@ public final class Playback {
         freeze = false;
         fence.set(null);
         persistent = Set.of();
+        mouse.reset(mc, keys.modifiers());
         keys.apply(mc, Set.of());
         if (old != null) old.result.completeExceptionally(new IllegalStateException(reason));
     }
@@ -109,9 +125,15 @@ public final class Playback {
         var r = active;
         if (r == null || r.ended || (mc.isPaused() && !mc.gui.isPausing())) return true;
         var run = r.runs.getFirst();
-        if (r.remaining == 0) {
-            r.remaining = run.ticks;
-            keys.apply(mc, run.held);
+        try {
+            if (r.remaining == 0) {
+                r.remaining = run.ticks;
+                keys.apply(mc, run.held);
+            }
+            mouse.tick(mc, run.mouse, r.maxSpeed, keys.modifiers());
+        } catch (RuntimeException error) {
+            reset(mc, "line " + run.line + ": " + error.getMessage());
+            return true;
         }
         r.inTick = true;
         return true;
@@ -122,8 +144,19 @@ public final class Playback {
         if (r == null || !r.inTick) return;
         r.inTick = false;
         r.executed++;
-        if (--r.remaining == 0) r.runs.removeFirst();
-        if (r.runs.isEmpty()) finish(mc, r);
+        if (!r.runs.getFirst().waitMouse && --r.remaining == 0) r.runs.removeFirst();
+        resolveControls(mc, r);
+    }
+
+    /** Clear and idle barriers happen between ticks, including at the edges of a block. */
+    private void resolveControls(Minecraft mc, Request r) {
+        while (!r.runs.isEmpty()) {
+            var run = r.runs.getFirst();
+            if (run.clear) mouse.clearMoves();
+            else if (!run.waitMouse || mouse.pending()) return;
+            r.runs.removeFirst();
+        }
+        finish(mc, r);
     }
 
     private void finish(Minecraft mc, Request r) {
@@ -159,11 +192,12 @@ public final class Playback {
         r.renderReady = false;
         String world = freeze ? "paused" : "not_needed";
         try {
+            var camera = FrameCamera.snapshot(mc);
             Screenshot.takeScreenshot(mc.gameRenderer.mainRenderTarget(), image -> {
                 mc.execute(() -> {
                     if (active != r) { image.close(); return; }
                     active = null;
-                    r.result.complete(new Observation(r.executed, world, image));
+                    r.result.complete(new Observation(r.executed, world, image, camera));
                 });
             });
         } catch (RuntimeException error) {

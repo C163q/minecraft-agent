@@ -15,9 +15,10 @@ root = Path(__file__).resolve().parents[2]
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(root / "mod"))
 from build import build_jar, game_classpath
+from mouse import exercise_mouse
 
 
-def exercise(client, work, log):
+def exercise(client, work, log, codex_env):
     serial = 0
 
     def submit(method, params):
@@ -40,16 +41,19 @@ def exercise(client, work, log):
     rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}})
     client.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
     client.stdin.flush()
-    assert [t["name"] for t in rpc("tools/list", {})["tools"]] == ["input_script"]
+    assert {t["name"] for t in rpc("tools/list", {})["tools"]} == {"input_script", "cursor_hint"}
 
     def play(args, expected_ticks, name, world="paused"):
         reply = rpc("tools/call", {"name": "input_script", "arguments": args})
         assert not reply.get("isError"), reply["content"][0]
         status, image = reply["content"]
-        assert json.loads(status["text"]) == {"world": world, "ticks": expected_ticks}, status
+        status = json.loads(status["text"])
+        assert status["world"] == world and (expected_ticks is None or status["ticks"] == expected_ticks), status
+        assert status["screenshot_id"] and status["width"] > 0 and status["height"] > 0, status
         png = base64.b64decode(image["data"], validate=True)
         assert png.startswith(b"\x89PNG\r\n\x1a\n") and image["mimeType"] == "image/png"
         (work / f"{name}.png").write_bytes(png)
+        return status
 
     def block(*lines):
         return {"script": "\n".join(["BEGIN", *lines, "END"])}
@@ -58,7 +62,18 @@ def exercise(client, work, log):
         text = log.read_text()[offset:]
         return re.findall(r"AGENT_SAMPLE ([01]{3})", text), re.findall(r"AGENT_KEY (\d+ [01])", text)
 
-    play(block(), 0, "initial")
+    initial = play(block(), 0, "initial")
+    if codex_env is not None:
+        from codex_mouse import exercise_codex
+        exercise_codex(work, codex_env, root / "target/debug/minecraft-mcp")
+        (work / "reset-view").touch()
+        deadline = time.monotonic() + 4
+        while not (work / "view-reset").exists():
+            if time.monotonic() > deadline:
+                raise TimeoutError("observer failed to restore camera")
+            time.sleep(.02)
+        initial = play(block("Wait(2)"), 2, "initial")
+    exercise_mouse(work, log, play, rpc, block, initial)
     offset = len(log.read_text())
     (work / "jump.input").write_text(block("KeyPress(w)", "Wait(5)", "Key(space)", "KeyRelease(w)")["script"])
     play({"path": "jump.input"}, 8, "jump")
@@ -95,7 +110,7 @@ def exercise(client, work, log):
     assert len(set(frame_ids)) < 8 and samples == ["100"] * 6 + ["110", "000"], (samples, frame_ids)
 
     offset = len(log.read_text())
-    long_call = submit("tools/call", {"name": "input_script", "arguments": block("KeyPress(w)", "Wait(4294967296)")})
+    long_call = submit("tools/call", {"name": "input_script", "arguments": block("KeyPress(w) MousePress(middle) MouseMove(Px(30000), Px(0), Px(1))", "Wait(4294967296)")})
     deadline = time.monotonic() + 5
     while "AGENT_KEY 26 1" not in log.read_text()[offset:]:
         if time.monotonic() > deadline:
@@ -104,7 +119,9 @@ def exercise(client, work, log):
     client.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": long_call}}) + "\n")
     client.stdin.flush()
     assert receive(long_call)["isError"]
-    play(block("Wait(1)"), 1, "after-cancel")
+    play(block("WaitMouseMove()", "Wait(1)"), 1, "after-cancel")
+    buttons = re.findall(r"AGENT_MOUSE (\d+ [01])", log.read_text()[offset:])
+    assert buttons == ["2 1", "2 0"], buttons
     samples, events = trace(offset)
     assert samples[-1] == "000" and events == ["26 1", "26 0"], (samples, events)
     print("PASS: eight ticks, handoff, remapping, invalid input, native pause, catch-up ticks, cancellation and END images.")
@@ -113,12 +130,19 @@ def exercise(client, work, log):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("profile", type=Path)
-    profile = parser.parse_args().profile.resolve()
+    parser.add_argument("--codex", action="store_true", help="also verify the image and aim in a live Codex CLI session")
+    args = parser.parse_args()
+    profile = args.profile.resolve()
     cp = game_classpath(profile)
     tmp = root / ".tmp"
     tmp.mkdir(exist_ok=True)
-    work = Path(tempfile.mkdtemp(dir=tmp, prefix="keyboard-"))
+    work = Path(tempfile.mkdtemp(dir=tmp, prefix="input-"))
     print(work, flush=True)
+    classes = work / "movement-classes"
+    classes.mkdir()
+    subprocess.run(["javac", "--release", "25", "-d", classes, root / "mod/src/main/java/mcagent/Movement.java",
+                    root / "tests/mouse/MovementTest.java"], check=True)
+    subprocess.run(["java", "-cp", classes, "mcagent.MovementTest"], check=True)
     mods = work / "mods"
     build_jar(root / "mod/src/main", mods / "minecraft-agent.jar", cp)
     build_jar(root / "tests/game", mods / "observer.jar", cp)
@@ -143,7 +167,7 @@ def main():
             client = subprocess.Popen([root / "target/debug/minecraft-mcp"], env=env, cwd=work,
                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
             try:
-                exercise(client, work, log)
+                exercise(client, work, log, env if args.codex else None)
             finally:
                 client.stdin.close()
                 try:
