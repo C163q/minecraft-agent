@@ -3,6 +3,7 @@
   "id": "minecraft_agent",
   "version": "0.1.0",
   "name": "Minecraft Agent",
+  "license": "Apache-2.0",
   "environment": "client",
   "entrypoints": { "client": ["mcagent.GameBridge"] },
   "mixins": ["minecraft_agent.mixins.json"],

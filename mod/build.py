@@ -30,7 +30,9 @@ def build_jar(source, destination, classpath):
         subprocess.run(["javac", "--release", "25", "-proc:none", "-cp", classpath, "-d", classes,
                         *sorted((source / "java").rglob("*.java"))], check=True)
         jar = Path(work) / destination.name
-        subprocess.run(["jar", "cf", jar, "-C", classes, ".", "-C", source / "resources", "."], check=True)
+        project_root = Path(__file__).resolve().parents[1]
+        subprocess.run(["jar", "cf", jar, "-C", classes, ".", "-C", source / "resources", ".",
+                        "-C", project_root, "LICENSE"], check=True)
         jar.replace(destination)
 
 
