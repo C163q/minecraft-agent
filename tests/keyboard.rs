@@ -20,9 +20,9 @@ fn waits_expand_before_the_entire_chord() {
 }
 
 #[test]
-fn raw_comments_blank_lines_and_crlf() {
+fn comments_skip_ticks_but_blank_lines_consume_them() {
     let script = Script::parse(
-        "BEGIN // entry\r\nKey(w)\r\n// skip\r\nKey(w) // hold\r\n  // release\r\n\r\nEND\r\n",
+        "BEGIN // entry\r\nKey(w)\r\n// skip\r\n  // skip\r\n\t// skip\r\nKey(w) // hold\r\n \t\r\n\r\nEND\r\n",
     )
     .unwrap();
     let f: Vec<_> = Keyboard::default().play(&script).collect();
@@ -31,7 +31,10 @@ fn raw_comments_blank_lines_and_crlf() {
     assert_eq!(f[1].held, keys(&["w"]));
     assert!(f[1].pressed.is_empty() && f[1].released.is_empty());
     assert_eq!(f[2].released, keys(&["w"]));
-    assert_eq!(f[2].line, 5);
+    assert_eq!(
+        f.iter().map(|frame| frame.line).collect::<Vec<_>>(),
+        [2, 6, 7, 8]
+    );
     assert!(f[3].held.is_empty() && f[3].released.is_empty());
 }
 

@@ -239,7 +239,7 @@ impl Script {
         for (index, raw) in text.lines().enumerate() {
             let line = index + 1;
             eof = line + 1;
-            if raw.starts_with("//") {
+            if raw.trim_start().starts_with("//") {
                 continue;
             }
             let code = raw
