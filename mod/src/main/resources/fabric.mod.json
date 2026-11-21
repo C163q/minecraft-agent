@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "id": "minecraft_agent",
+  "version": "0.1.0",
+  "name": "Minecraft Agent",
+  "environment": "client",
+  "entrypoints": { "client": ["mcagent.GameBridge"] },
+  "mixins": ["minecraft_agent.mixins.json"],
+  "depends": { "fabricloader": ">=0.20.1", "minecraft": "26.3", "java": ">=25" }
+}

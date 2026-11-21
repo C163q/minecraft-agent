@@ -12,5 +12,5 @@
 mod keyboard;
 mod parser;
 
-pub use keyboard::{KeyFrame, Keyboard};
+pub use keyboard::{DispatchProgram, KeyFrame, KeyRun, Keyboard};
 pub use parser::{ParseError, Script, ScriptSource};

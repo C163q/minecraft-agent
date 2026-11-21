@@ -1,5 +1,5 @@
 use crate::parser::{KeyAction, Keys, Script};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct KeyFrame {
@@ -59,5 +59,74 @@ impl Keyboard {
             pressed,
             released,
         }
+    }
+}
+
+/// Repeated ticks with the same desired physical keyboard state.
+#[derive(Debug)]
+pub struct KeyRun {
+    pub line: usize,
+    pub ticks: u64,
+    pub held: BTreeSet<String>,
+}
+
+pub struct DispatchProgram {
+    pub runs: Vec<KeyRun>,
+    pub persistent: BTreeSet<String>,
+    /// Includes release-only names, so all bindings can be validated before playback.
+    pub keys: BTreeMap<String, usize>,
+}
+
+impl Script {
+    pub fn compile(&self, persistent: BTreeSet<String>) -> DispatchProgram {
+        let mut keyboard = Keyboard {
+            persistent,
+            held: BTreeSet::new(),
+        };
+        let mut runs = Vec::new();
+        let mut keys = BTreeMap::new();
+        for row in &self.rows {
+            for key in row.keys.keys() {
+                keys.entry(key.clone()).or_insert(row.line);
+            }
+            if row.wait > 0 {
+                runs.push(KeyRun {
+                    line: row.line,
+                    ticks: row.wait,
+                    held: keyboard.step(row.line, None).held,
+                });
+            }
+            if !row.keys.is_empty() {
+                runs.push(KeyRun {
+                    line: row.line,
+                    ticks: 1,
+                    held: keyboard.step(row.line, Some(&row.keys)).held,
+                });
+            }
+        }
+        DispatchProgram {
+            runs,
+            persistent: keyboard.persistent,
+            keys,
+        }
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn compile_preserves_waits_and_transfers_without_replaying_prior_ticks() {
+        let script =
+            Script::parse("BEGIN\nWait(4294967296) Key(w)\nKeyPress(w) KeyRelease(a)\nEND")
+                .unwrap();
+        let program = script.compile(BTreeSet::from(["a".to_owned()]));
+        assert_eq!(program.runs.len(), 3);
+        assert_eq!(program.runs[0].ticks, 4294967296);
+        assert_eq!(program.runs[0].held, BTreeSet::from(["a".to_owned()]));
+        assert_eq!(program.runs[1].held.len(), 2);
+        assert_eq!(program.persistent, BTreeSet::from(["w".to_owned()]));
+        assert!(program.keys.contains_key("a"));
     }
 }

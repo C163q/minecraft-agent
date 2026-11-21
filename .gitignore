@@ -2,3 +2,5 @@
 /.tmp/
 
 /target/
+/mod/build/
+__pycache__/

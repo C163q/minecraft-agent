@@ -1,0 +1,5 @@
+{
+  "required": true, "package": "mcagent.mixin", "compatibilityLevel": "JAVA_25",
+  "client": ["ClientLoop", "Pause", "ServerTick", "Marker", "PhysicalKeys"],
+  "injectors": { "defaultRequire": 1 }
+}

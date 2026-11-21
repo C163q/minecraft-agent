@@ -1,0 +1,4 @@
+{
+  "required":true, "package":"mcagenttest.mixin", "compatibilityLevel":"JAVA_25",
+  "client":["Sample","Events","Frames"], "injectors":{"defaultRequire":1}
+}

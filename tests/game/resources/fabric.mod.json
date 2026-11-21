@@ -1,0 +1,4 @@
+{
+  "schemaVersion": 1, "id": "keyboard_observer", "version":"1", "environment":"client",
+  "entrypoints":{"client":["mcagenttest.Observer"]}, "mixins":["keyboard-observer.mixins.json"]
+}
