@@ -5,12 +5,15 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.damagesource.DamageSource;
-import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.world.item.component.BlocksAttacks;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.item.*;
 
 /** One controlled stimulus on a dispatched tick in the disposable test world. */
 public final class DamageStimulus {
+    public static boolean dropAtNextMarker;
+
     public static void tick() {
         var file = Path.of("test-hit");
         if (!Files.exists(file)) return;
@@ -18,6 +21,10 @@ public final class DamageStimulus {
             String mode = Files.readString(file).trim();
             Files.delete(file);
             var mc = Minecraft.getInstance();
+            if (mode.equals("late-drop")) {
+                dropAtNextMarker = true;
+                return;
+            }
             if (mode.equals("client-drop")) {
                 mc.player.hurtTo(20);
                 mc.player.hurtTo(16);
@@ -50,14 +57,19 @@ public final class DamageStimulus {
         if (mode.equals("gold")) {
             player.getAttribute(Attributes.MAX_ABSORPTION).setBaseValue(12);
             player.setAbsorptionAmount(10);
-        } else if (mode.equals("shield")) {
-            player.setItemInHand(InteractionHand.OFF_HAND, new ItemStack(Items.SHIELD));
+        } else if (mode.endsWith("shield")) {
+            var shield = new ItemStack(Items.SHIELD);
+            var vanilla = shield.get(DataComponents.BLOCKS_ATTACKS);
+            var reductions = vanilla.damageReductions();
+            if (mode.equals("partial-shield")) {
+                reductions = reductions.stream().map(r -> new BlocksAttacks.DamageReduction(
+                    r.horizontalBlockingAngle(), r.type(), r.base(), r.factor() * 0.5f)).toList();
+            }
+            // Zero raise delay makes the shield active on this exact test tick.
+            shield.set(DataComponents.BLOCKS_ATTACKS, new BlocksAttacks(0, vanilla.disableCooldownScale(),
+                reductions, vanilla.itemDamage(), vanilla.bypassedBy(), vanilla.blockSound(), vanilla.disableSound()));
+            player.setItemInHand(InteractionHand.OFF_HAND, shield);
             player.startUsingItem(InteractionHand.OFF_HAND);
-            try {
-                var remaining = LivingEntity.class.getDeclaredField("useItemRemaining");
-                remaining.setAccessible(true);
-                remaining.setInt(player, remaining.getInt(player) - 10);
-            } catch (ReflectiveOperationException error) { throw new AssertionError(error); }
         } else if (mode.equals("restore")) {
             player.setHealth(20);
             player.setAbsorptionAmount(0);
@@ -72,7 +84,7 @@ public final class DamageStimulus {
                 System.out.println("AGENT_REPEAT " + strength + " " + again);
             }
         }
-        if (mode.equals("shield")) {
+        if (mode.endsWith("shield")) {
             player.stopUsingItem();
             player.setItemInHand(InteractionHand.OFF_HAND, ItemStack.EMPTY);
         }

@@ -56,6 +56,12 @@ def exercise_events(work, log, play, rpc, block, inspect):
                                            for r in snap["queue"]["entries"])
 
     send(["CLEAR"], 0)
+    send(["PAUSE", 'ScreenShot("later.png")', "PAUSE", "Key(s)"], 0)
+    before = inspect()["queue"]
+    result = send(["CLEAR_LISTENERS"], 0)
+    assert result["pause_reason"] == "end" and inspect()["queue"] == before
+    assert not (work / "later.png").exists()
+    send(["CLEAR"], 0)
     both = [*handler("HpLost", "PAUSE"), *handler("HpLost", "PAUSE"), "Wait(4)"]
     hit("client-drop")
     result = send(both, 1)
@@ -63,9 +69,11 @@ def exercise_events(work, log, play, rpc, block, inspect):
 
     for mode, event, expected, server_result in [
             ("micro", "HpLost", True, "micro true"),
+            ("micro", "Hurt", True, "micro true"),
             ("gold", "Hurt", True, "gold true"),
             ("gold", "HpLost", False, "gold true"),
             ("shield", "Hurt", False, "shield false"),
+            ("partial-shield", "Hurt", True, "partial-shield true"),
             ("cooldown", "Hurt", True, "cooldown true")]:
         send(["CLEAR"], 0)
         hit(mode)
@@ -96,11 +104,22 @@ def exercise_events(work, log, play, rpc, block, inspect):
     assert inspect()["held"]["keys"] == {"s": "temporary"}
     send(["CLEAR"], 0)
 
-    previous = (work / "explicit.png").read_bytes()
+    (work / "explicit.png").write_text("previous capture")
+    send(['ScreenShot("explicit.png") PAUSE'], 0, "repeated-output", True)
+    assert (work / "explicit.png").read_bytes() == (work / "repeated-output.png").read_bytes()
+    (work / "a-directory").mkdir()
     failed = rpc("tools/call", {"name": "input_script", "arguments": block(
-        'ScreenShot("explicit.png") PAUSE', "Key(d)")})
-    assert failed.get("isError") and (work / "explicit.png").read_bytes() == previous
+        'ScreenShot("a-directory") PAUSE', "Key(d)")})
+    assert failed.get("isError") and (work / "a-directory").is_dir()
     assert [r["source"] for r in inspect()["queue"]["entries"]] == ["Key(d)"]
+    send(["CLEAR"], 0)
+
+    hit("late-drop")
+    status = send([*handler("HpLost", "Key(s)"), "Key(w) PAUSE"], 1)
+    assert status["pause_reason"] == "pause" and not origins(status)
+    state = inspect()
+    assert state["listeners"] == [] and state["queue"]["total"] == 0
+    assert "AGENT_LATE_DROP" in log.read_text()
     send(["CLEAR"], 0)
 
     hit("respawn")

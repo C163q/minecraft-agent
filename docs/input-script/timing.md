@@ -55,6 +55,6 @@ END
 
 ## 显式保存截图
 
-`ScreenShot("hit.png") PAUSE` 在零拍边界暂停，保存确认后的 PNG。开启自动返图时，文件与返回图使用同一份 PNG；传 `include_screenshot=false` 仍保存文件。文件路径为 JSON 双引号字符串，相对路径从提交脚本的 MCP 工作目录解析，父目录须存在，目标文件名须为新文件。
+`ScreenShot("hit.png") PAUSE` 在零拍边界暂停，保存确认后的 PNG。开启自动返图时，文件与返回图使用同一份 PNG；传 `include_screenshot=false` 仍保存文件。文件路径为 JSON 双引号字符串，相对路径从提交脚本的 MCP 工作目录解析，父目录须存在。多次写入同一路径时，新的 PNG 完整写入后替换旧文件，适合用同一文件保存最近一次事件画面。
 
 `ScreenShot("view.png")` 单独一行时，在派发下一拍前等待画面、保存并继续。`PAUSE` 仍须位于行尾。同一行写 `PAUSE ScreenShot("view.png")` 会在整块校验时出错；将截图另起一行则在恢复后执行。

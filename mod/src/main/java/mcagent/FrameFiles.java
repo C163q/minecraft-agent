@@ -6,6 +6,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.List;
 import javax.imageio.ImageIO;
 
@@ -21,7 +22,7 @@ final class FrameFiles {
             Path temp = Files.createTempFile(path.getParent(), ".minecraft-agent-", ".png");
             try {
                 Files.write(temp, png);
-                Files.createLink(path, temp);
+                Files.move(temp, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             } finally {
                 Files.deleteIfExists(temp);
             }

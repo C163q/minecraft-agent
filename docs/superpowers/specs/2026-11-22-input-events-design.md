@@ -1,6 +1,6 @@
 # 输入事件的注册、触发与查询
 
-本规格描述本地单人游戏中 `input_script` 的事件行为。脚本可以响应本地玩家的受伤与普通生命值下降，复用[暂停与继续](../../input-script/pause.md)和[队列快照](../../input-script/inspect.md)。`ON`、`CLEAR_LISTENERS` 及下述事件字段属于设计中的接口。
+本规格描述本地单人游戏中 `input_script` 的事件行为。脚本可以响应本地玩家的受伤与普通生命值下降，复用[暂停与继续](../../input-script/pause.md)和[队列快照](../../input-script/inspect.md)。`ON`、`CLEAR_LISTENERS` 及事件字段的使用方式见[受伤事件与监听](../../input-script/events.md)。
 
 ## 注册与注销
 
@@ -44,7 +44,7 @@ END
 
 事件处理块执行显式 `PAUSE` 时，沿用 `pause_reason: "pause"`。停止结果按实际注册顺序列出本边界执行了 `PAUSE` 的监听，每项含事件名、所属顶层块编号和声明所在源行号。显式暂停发生在哪一行与监听声明所在行可以不同。返回图片继续由当次调用的 `include_screenshot` 决定。
 
-配合拟议的显式截图指令时，`ScreenShot("hit.png") PAUSE` 保存同一张停止帧，关闭自动返图仍须保存指定文件。`PAUSE` 保持独占一行或位于行尾的语法，因此同一行的 `PAUSE ScreenShot("hit.png")` 在整块校验时报错；将截图另起一行则留待恢复后执行。
+配合显式截图指令时，`ScreenShot("hit.png") PAUSE` 保存同一张停止帧，关闭自动返图仍须保存指定文件。`PAUSE` 保持独占一行或位于行尾的语法，因此同一行的 `PAUSE ScreenShot("hit.png")` 在整块校验时报错；将截图另起一行则留待恢复后执行。
 
 `inspect_input.listeners` 仅列出仍注册的监听，并带同一组来源信息。`ready` 表示可再次响应；`handling` 表示该声明已有未结束的处理块。`queue` 保留现有段、来源行、分页和文件导出格式，事件处理块的段额外携带其监听来源。即使声明已注销，已有段仍能追溯到原来的块和声明行。例如上例触发后暂停时，`Hurt` 为 `handling`，`Key(s)` 待执行。此时只提交 `CLEAR_LISTENERS`，再次查询得到空的 `listeners`，`Key(s)` 仍带原来源。
 

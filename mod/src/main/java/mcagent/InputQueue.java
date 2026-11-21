@@ -98,6 +98,7 @@ final class InputQueue {
         final Set<String> legacyFinal;
         long id, remaining;
         Listener listener;
+        boolean onlyClearsListeners;
 
         private Block(Set<String> legacyFinal) { this.legacyFinal = legacyFinal; }
 
@@ -108,6 +109,7 @@ final class InputQueue {
             var finalKeys = names(json, "persistent", knownKeys);
             var block = new Block(incremental ? null : finalKeys);
             for (var el : json.getAsJsonArray("runs")) block.runs.add(Run.read(el.getAsJsonObject(), knownKeys, incremental, false));
+            block.onlyClearsListeners = !block.runs.isEmpty() && block.runs.stream().allMatch(Run::clearListeners);
             block.loadRemaining();
             return block;
         }
@@ -126,7 +128,7 @@ final class InputQueue {
     private final TreeSet<String> persistent = new TreeSet<>();
     private long lastId, lastRegistration;
     private final List<Listener> listeners = new ArrayList<>();
-    private final List<Listener> pending = new ArrayList<>();
+    private final List<Block> pending = new ArrayList<>();
     private List<Origin> pauseListeners = List.of();
     private final List<Path> screenshots = new ArrayList<>();
 
@@ -134,7 +136,12 @@ final class InputQueue {
         for (var listener : listeners) {
             if (!listener.handling && listener.origin.event.equals(event)) {
                 listener.handling = true;
-                pending.add(listener);
+                var block = new Block(null);
+                block.id = ++lastId;
+                block.listener = listener;
+                block.runs.addAll(listener.body);
+                block.loadRemaining();
+                pending.add(block);
             }
         }
     }
@@ -143,15 +150,8 @@ final class InputQueue {
 
     // An event can arrive mid-tick. Enlist its block only after the dispatched tick advances.
     private void activateObserved() {
-        pending.sort(Comparator.comparingLong(listener -> listener.order));
-        for (var listener : pending) {
-            var block = new Block(null);
-            block.id = ++lastId;
-            block.listener = listener;
-            block.runs.addAll(listener.body);
-            block.loadRemaining();
-            blocks.add(block);
-        }
+        pending.sort(Comparator.comparingLong(block -> block.listener.order));
+        blocks.addAll(pending);
         pending.clear();
     }
 
@@ -199,6 +199,14 @@ final class InputQueue {
     /** Newer CLEAR takes effect before an older block can execute a control at this boundary. */
     String controls(BooleanSupplier moving, Runnable clearMoves) {
         activateObserved();
+        if (foreground != null && foreground.onlyClearsListeners) {
+            // This zero-tick submission edits subscriptions without resuming any older control.
+            listeners.clear();
+            blocks.remove(foreground);
+            foreground = null;
+            pauseListeners = List.of();
+            return "end";
+        }
         var paused = new HashSet<Block>();
         boolean end = false, cleared;
         do {
@@ -216,6 +224,7 @@ final class InputQueue {
                     if (run.screenshot != null) screenshots.add(run.screenshot);
                     if (run.pause) {
                         paused.add(block);
+                        if (block.runs.isEmpty()) expireOwnedListeners(block);
                         break;
                     }
                     if (run.clear) {
@@ -250,8 +259,12 @@ final class InputQueue {
         return end ? "end" : null;
     }
 
-    private void retire(Block block) {
+    private void expireOwnedListeners(Block block) {
         listeners.removeIf(l -> l.origin.block == block.id);
+    }
+
+    private void retire(Block block) {
+        expireOwnedListeners(block);
         if (block.listener != null) block.listener.handling = false;
     }
 
@@ -295,21 +308,18 @@ final class InputQueue {
 
     List<Entry> inspect() {
         var rows = new ArrayList<Entry>();
-        for (var block : blocks) {
-            boolean head = true;
-            for (var run : block.runs) {
-                String remaining = run.ticks == 0 ? null : Long.toUnsignedString(head ? block.remaining : run.ticks);
-                rows.add(new Entry(block.id, run.line, run.source, remaining, block.listener == null ? null : block.listener.origin));
-                head = false;
-            }
-        }
-        // Predict IDs in activation order without enlisting an observed block in a tick already in flight.
-        long id = lastId;
-        for (var l : pending.stream().sorted(Comparator.comparingLong(l -> l.order)).toList()) {
-            id++;
-            for (var run : l.body) rows.add(new Entry(id, run.line, run.source,
-                run.ticks == 0 ? null : Long.toUnsignedString(run.ticks), l.origin));
-        }
+        for (var block : blocks) inspectBlock(block, rows);
+        pending.stream().sorted(Comparator.comparingLong(b -> b.listener.order))
+            .forEach(block -> inspectBlock(block, rows));
         return rows;
+    }
+
+    private static void inspectBlock(Block block, List<Entry> rows) {
+        boolean head = true;
+        for (var run : block.runs) {
+            String remaining = run.ticks == 0 ? null : Long.toUnsignedString(head ? block.remaining : run.ticks);
+            rows.add(new Entry(block.id, run.line, run.source, remaining, block.listener == null ? null : block.listener.origin));
+            head = false;
+        }
     }
 }

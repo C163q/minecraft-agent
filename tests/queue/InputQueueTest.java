@@ -238,7 +238,9 @@ public final class InputQueueTest {
         equal(null, controls());
         equal(2, queue.inspect().size());
         queue.observe("Hurt");
+        long hurtBlock = queue.inspect().getLast().block();
         queue.observe("HpLost");
+        equal(hurtBlock, queue.inspect().getLast().block());
         equal(4, queue.inspect().size());
         tick("a", "w", "s");
         equal(Set.of("w"), queue.persistent());
@@ -246,7 +248,36 @@ public final class InputQueueTest {
         equal(2L, queue.listeners().stream().filter(l -> l.state().equals("ready")).count());
     }
 
+    void lastExplicitPauseExpiresOwner() {
+        queue.submit(wire("""
+            {"queue_version":1,"persistent":[],"runs":[
+              {"line":2,"ticks":"0","held":[],"event":"Hurt","body":[]},
+              {"line":5,"ticks":"1","held":[]},
+              {"line":5,"ticks":"0","held":[],"pause":true}]}
+            """));
+        tick();
+        equal("pause", controls());
+        queue.observe("Hurt");
+        equal(List.of(), queue.listeners());
+        equal(false, queue.hasObserved());
+    }
+
+    void onlyClearingListenersPreservesOldControls() {
+        submit("pause", "pause", "s=temporary");
+        equal("pause", controls());
+        var old = queue.inspect();
+        queue.submit(wire("""
+            {"queue_version":1,"persistent":[],"runs":[
+              {"line":2,"ticks":"0","held":[],"clear_listeners":true}]}
+            """));
+        equal("end", controls());
+        equal(old, queue.inspect());
+        equal("pause", controls());
+    }
+
     public static void main(String[] args) {
+        new InputQueueTest().lastExplicitPauseExpiresOwner();
+        new InputQueueTest().onlyClearingListenersPreservesOldControls();
         new InputQueueTest().observedBeforeDispatchMergesInRegistrationOrder();
         new InputQueueTest().lastTickEvent(ACTION, "end", 1);
         new InputQueueTest().lastTickEvent(PAUSE, "pause", 0);
