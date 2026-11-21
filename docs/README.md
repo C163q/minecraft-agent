@@ -22,3 +22,4 @@
 - [END 停止帧中的玩家红心和实体位置](research/2026-11-21-world-stop-frame.md)
 - [Codex 通过 Rust MCP 直接观察 Minecraft 停止帧](research/2026-11-21-codex-image.md)
 - [Codex 在两种 GUI 缩放下看图取出钻石](research/2026-11-21-codex-gui-click.md)
+- [Codex 第一人称瞄准与持续挖掘](research/2026-11-21-first-person-mining.md)

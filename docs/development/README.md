@@ -29,3 +29,5 @@ javap -p -c -classpath "$MC_JAR" net.minecraft.client.server.IntegratedServer
 通过 stdio 接入 Codex 时，最终截图可直接作为 MCP 工具结果的 `image` 内容块与暂停状态一同返回。模型可直接观察该图，详情见 [Codex 单图实机盲测](../research/2026-11-21-codex-image.md)。
 
 GUI 点选使用原始截图的像素坐标。输入端根据实际窗口逻辑尺寸换算鼠标位置，再由 Minecraft 按当前 GUI 缩放处理命中。标点副本与原图保持相同尺寸。已测范围见[两种 GUI 缩放下的箱子点选](../research/2026-11-21-codex-gui-click.md)。
+
+第一人称下，鼠标被游戏捕获，相对输入经玩家的灵敏度设置转换为视角变化。实机验证可以分别记录实际转角、左键按下时的准星命中、逐拍攻击键状态和服务端方块变化，再与模型看到的停止帧核对。见[第一人称瞄准与持续挖掘](../research/2026-11-21-first-person-mining.md)。
