@@ -32,3 +32,4 @@
 - [input_script 的时间与键盘输入](superpowers/specs/2026-11-21-input-script-design.md)
 - [鼠标输入与截图瞄准](superpowers/specs/2026-11-21-mouse-input.md)，[实施与验证计划](superpowers/plans/2026-11-21-mouse-input.md)
 - [暂停、手动继续与增量队列](superpowers/specs/2026-11-22-pause-queue.md)，[实施与验证](superpowers/plans/2026-11-22-pause-queue.md)
+- [输入事件的注册、触发与查询](superpowers/specs/2026-11-22-input-events-design.md)
