@@ -6,7 +6,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import net.fabricmc.api.ClientModInitializer;
 import net.minecraft.client.*;
+import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.options.controls.KeyBindsScreen;
+import net.minecraft.client.gui.screens.worldselection.CreateWorldScreen;
 import net.minecraft.client.resources.language.I18n;
 import net.minecraft.world.item.*;
 import net.minecraft.world.level.*;
@@ -75,6 +77,13 @@ public final class Observer implements ClientModInitializer {
         if (!Files.exists(request)) return;
         try {
             var command = Files.readString(request).strip().split(" ");
+            if (command[0].equals("read-text")) {
+                Files.writeString(Path.of("focused-text"), mc.submit(() ->
+                    mc.gui.screen() != null && mc.gui.screen().getFocused() instanceof EditBox field
+                        ? field.getValue() : "<no focused text field>").join());
+                Files.delete(request);
+                return;
+            }
             if (command[0].equals("motion") || command[0].equals("view")) {
                 mouseInput(mc, command);
                 Files.delete(request);
@@ -123,11 +132,30 @@ public final class Observer implements ClientModInitializer {
         }
     }
 
+    private void worldNameFixture(Minecraft mc) throws Exception {
+        var title = mc.submit(() -> mc.gui.screen()).join();
+        mc.submit(() -> CreateWorldScreen.openFresh(mc, () -> mc.gui.setScreen(title))).join();
+        await(() -> mc.submit(() -> mc.gui.screen() instanceof CreateWorldScreen && mc.gui.overlay() == null).join());
+        mc.submit(() -> {
+            var screen = (CreateWorldScreen)mc.gui.screen();
+            var field = screen.children().stream().filter(EditBox.class::isInstance)
+                .map(EditBox.class::cast).findFirst().orElseThrow();
+            screen.setFocused(field);
+            field.moveCursorToEnd(false);
+            screen.getUiState().addListener(state -> System.out.println("AGENT_NAME [" + state.getName() + "]"));
+        }).join();
+        Files.createFile(Path.of("name-ready"));
+        await(() -> Files.exists(Path.of("name-done")) || Files.exists(Path.of("done")));
+        mc.submit(() -> mc.gui.screen().onClose()).join();
+    }
+
     @Override public void onInitializeClient() {
         Thread.ofPlatform().daemon().start(() -> {
             var mc = Minecraft.getInstance();
             try {
                 await(() -> mc.submit(() -> mc.gui != null && mc.gui.screen() != null && mc.gui.overlay() == null).join());
+                worldNameFixture(mc);
+                if (Files.exists(Path.of("done"))) return;
                 mc.submit(() -> {
                     mc.options.pauseOnLostFocus = false;
                     mc.options.keyLeft.setKey(InputConstants.getKey("key.keyboard.k"));

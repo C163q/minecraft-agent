@@ -32,7 +32,7 @@ def has_pause_icon(path):
     return False
 
 
-def exercise(client, work, log, codex_env):
+def exercise(client, work, log, codex_env, wait_ready):
     serial = 0
 
     def submit(method, params):
@@ -94,7 +94,19 @@ def exercise(client, work, log, codex_env):
         assert reply["structuredContent"] == state
         return state
 
+    play(block("Key(left_control) Key(a)", "Key(backspace)", "Key(left_shift) Key(a)", "Key(b)",
+               "Key(c)", "KeyPress(d)", "Wait(2)", "KeyRelease(d)", "Key(space)", "Key(1)",
+               "Key(backspace)", "Key(left_shift) Key(1)"), 13, "world-name", world="not_needed")
+    names = re.findall(r"AGENT_NAME \[(.*)\]", log.read_text())
+    assert names == ["", "A", "Ab", "Abc", "Abcd", "Abcd ", "Abcd 1", "Abcd ", "Abcd !"], names
+    (work / "name-done").touch()
+    wait_ready("ready")
     assert inspect()["world"] == "unpaused"
+    from pause_binding import observer_input
+    play(block("Key(t)", "Wait(2)", "Key(b)", "Key(left_shift) Key(c)"), 5, "chat-text")
+    observer_input(work, "read-text")
+    assert (work / "focused-text").read_text() == "bC"
+    play(block("Key(escape)", "Wait(1)"), 2, "chat-closed")
     initial = play(block(), 0, "initial")
     for invalid in (None, "false", 0):
         rejected = rpc("tools/call", {"name": "input_script", "arguments": dict(block(), include_screenshot=invalid)})
@@ -253,15 +265,17 @@ def main():
         env = dict(os.environ, MINECRAFT_AGENT_SOCKET=f"{socket_dir}/game.sock")
         game = subprocess.Popen(java, cwd=work, env=env, stdout=out, stderr=subprocess.STDOUT)
         try:
-            deadline = time.monotonic() + 100
-            while not (work / "ready").is_file():
-                if game.poll() is not None or time.monotonic() > deadline:
-                    raise RuntimeError(f"Game setup failed; see {log}")
-                time.sleep(.1)
+            def wait_ready(marker):
+                deadline = time.monotonic() + 100
+                while not (work / marker).is_file():
+                    if game.poll() is not None or time.monotonic() > deadline:
+                        raise RuntimeError(f"Game setup failed waiting for {marker}; see {log}")
+                    time.sleep(.1)
+            wait_ready("name-ready")
             client = subprocess.Popen([root / "target/debug/minecraft-mcp"], env=env, cwd=work,
                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
             try:
-                exercise(client, work, log, env if args.codex else None)
+                exercise(client, work, log, env if args.codex else None, wait_ready)
             finally:
                 client.stdin.close()
                 try:

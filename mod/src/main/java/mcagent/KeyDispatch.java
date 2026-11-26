@@ -73,7 +73,16 @@ final class KeyDispatch {
         if (press) held.add(code); else held.remove(code);
         short mods = modifiers();
         int logical = SDLKeyboard.SDL_GetKeyFromScancode(code, mods, false);
-        mc.keyboardHandler.keyPress(mc.getWindow().handle(), press ? InputConstants.PRESS : InputConstants.RELEASE,
+        long window = mc.getWindow().handle();
+        var screen = mc.gui.screen();
+        // SDL sends committed text separately from key-down. Only type into an editor
+        // that was already receiving text when this press began (e.g. T opens chat).
+        boolean typing = press && screen != null && (mods & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_GUI)) == 0
+            && Character.isValidCodePoint(logical) && !Character.isISOControl(logical)
+            && SDLKeyboard.SDL_TextInputActive(window);
+        mc.keyboardHandler.keyPress(window, press ? InputConstants.PRESS : InputConstants.RELEASE,
             new KeyEvent(code, logical, mods));
+        if (typing && mc.gui.screen() == screen && SDLKeyboard.SDL_TextInputActive(window))
+            mc.keyboardHandler.textInput(window, Character.toString(logical));
     }
 }
