@@ -6,6 +6,8 @@
 
 构建与实机验证入口见[输入 Mod 与 Rust MCP](keyboard-bridge.md)。`minecraft-input` 的核心逻辑位于仓库根目录的 Rust 库中。用户和 LLM 使用[脚本语法参考](../input-script/README.md)。`Script::parse` 验证内联文本，`ScriptSource::load` 统一处理文本和文件，文件的相对路径基准由调用方传入。入口见[解析器](../../src/parser.rs)。
 
+多文件提交由 [IMPORT 加载器](../../src/parser/imports.rs) 在 MCP 主机端读取和绑定。编译器向游戏发送根入口和全提交的函数表，同时把库入口出现的键名加入现有的按键校验表。Mod 在恢复游戏前验证键名，因此更新支持函数的实例时，IMPORT 只需更新 MCP。用户示例见[从文件导入函数](../input-script/imports.md)。
+
 每个游戏会话复用一个 [Keyboard](../../src/keyboard.rs)。`play(&script)` 返回惰性迭代器，对固定拍数的输入，每次取下一项推进一个输入 tick，得到源行号、本拍按下、释放和保持的键集合。这个固定拍预览跳过零拍控制并把动态鼠标等待视为空闲；游戏端负责真正的中断、恢复和增量合并。MCP 的 `Script::compile` 复用同一键状态逻辑，压缩连续等待并交给 Mod 在游戏线程逐拍派发。
 
 在仓库根目录运行 `cargo test --offline` 验证语法、逐拍状态与示例。运行 `cargo clippy --offline --all-targets -- -D warnings` 检查代码。

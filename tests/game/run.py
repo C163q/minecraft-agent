@@ -226,6 +226,8 @@ def exercise(client, work, log, codex_env, wait_ready):
     assert not has_pause_icon(work / "resumed.png"), "pause indicator persisted after resuming"
     from functions import exercise_functions
     exercise_functions(work, log, play, rpc, block, inspect)
+    from imports import exercise_imports
+    exercise_imports(work, play, rpc, block, inspect)
     from events import exercise_events
     exercise_events(work, log, play, rpc, block, inspect, codex_env)
     print("PASS: eight ticks, handoff, remapping, invalid input, native pause, catch-up ticks, cancellation and END images.")
