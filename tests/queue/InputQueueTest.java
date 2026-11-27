@@ -6,6 +6,8 @@ import com.google.gson.JsonParser;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 /** Exercises the actual wire decoder and tick scheduler without launching a game. */
 public final class InputQueueTest {
@@ -712,7 +714,78 @@ public final class InputQueueTest {
         for (int i = 0; i < 32; i++) equal(i + 4, events.get(i).getAsJsonObject().get("x").getAsInt());
     }
 
+    void worldTransitionWaitsForReadyDestination() {
+        var wait = new WorldTransition(7, "leave", new CompletableFuture<>(), 0);
+        equal(null, wait.frameStatus(1, true, true));
+        wait.signal(7, "completed", 2);
+        equal(null, wait.frameStatus(3, false, true));
+        equal("completed", wait.frameStatus(4, true, true));
+        equal(false, wait.signal(7, "failed", TimeUnit.SECONDS.toNanos(30)));
+        equal("in_progress", wait.frameStatus(TimeUnit.SECONDS.toNanos(30), true, true));
+    }
+
+    void worldTransitionAcceptsOnlyLiveOwnerSignals() {
+        var result = new CompletableFuture<Playback.Observation>();
+        var wait = new WorldTransition(7, "enter", result, 0);
+        wait.signal(6, "failed", 1);
+        equal(null, wait.frameStatus(2, false, true));
+        wait.signal(7, "needs_input", 3);
+        equal(null, wait.frameStatus(4, false, false));
+        equal("needs_input", wait.frameStatus(4, false, true));
+        wait.signal(7, null, 5);
+        equal(null, wait.frameStatus(6, false, true));
+        result.cancel(false);
+        equal(false, wait.accepts(7, 8));
+    }
+
+    void worldTransitionBoundsMissingReadbackForItsOwnPeer() {
+        var result = new CompletableFuture<Playback.Observation>();
+        var wait = new WorldTransition(7, "enter", result, 0);
+        wait.expire(result, TimeUnit.SECONDS.toNanos(30));
+        equal(false, result.isDone());
+        wait.expire(new CompletableFuture<>(), TimeUnit.SECONDS.toNanos(35));
+        equal(false, result.isDone());
+        wait.expire(result, TimeUnit.SECONDS.toNanos(35));
+        equal(true, result.isCompletedExceptionally());
+    }
+
+    void worldTransitionReleasesPauseWhenCompletedFrameCannotBeSent() {
+        var result = new CompletableFuture<Playback.Observation>();
+        var wait = new WorldTransition(7, "enter", result, 0);
+        result.complete(new Playback.Observation(1, "paused", "world_changed", List.of(),
+            new EventJournal().seal(), null, null, new Playback.Transition("enter", "completed", true), null));
+        equal(false, wait.deliveryConfirmed());
+        equal(false, wait.abandoned());
+
+        wait.finishDelivery(new CompletableFuture<>(), false);
+        equal(false, wait.abandoned());
+        wait.finishDelivery(result, false);
+        equal(true, wait.abandoned());
+        equal(false, result.isCompletedExceptionally());
+        wait.finishDelivery(result, true);
+        equal(false, wait.deliveryConfirmed());
+    }
+
+    void worldTransitionRetainsPauseAfterSuccessfulDelivery() {
+        var result = new CompletableFuture<Playback.Observation>();
+        var wait = new WorldTransition(7, "enter", result, 0);
+        wait.finishDelivery(result, true);
+        equal(false, wait.deliveryConfirmed());
+
+        result.complete(new Playback.Observation(1, "paused", "world_changed", List.of(),
+            new EventJournal().seal(), null, null, new Playback.Transition("enter", "completed", true), null));
+        wait.finishDelivery(result, true);
+        wait.finishDelivery(result, false);
+        equal(true, wait.deliveryConfirmed());
+        equal(false, wait.abandoned());
+    }
+
     public static void main(String[] args) {
+        new InputQueueTest().worldTransitionWaitsForReadyDestination();
+        new InputQueueTest().worldTransitionAcceptsOnlyLiveOwnerSignals();
+        new InputQueueTest().worldTransitionBoundsMissingReadbackForItsOwnPeer();
+        new InputQueueTest().worldTransitionReleasesPauseWhenCompletedFrameCannotBeSent();
+        new InputQueueTest().worldTransitionRetainsPauseAfterSuccessfulDelivery();
         new InputQueueTest().recordsOneNotificationInObservationOrder();
         new InputQueueTest().sealsAtTheStopFrameWhileRetainingListeners();
         new InputQueueTest().reportsListenersFromAnOlderSubmissionInTheNewWindow();

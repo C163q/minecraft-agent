@@ -3,6 +3,7 @@ package mcagent;
 import com.google.gson.JsonObject;
 import com.mojang.blaze3d.platform.InputConstants;
 import java.util.*;
+import java.util.function.BooleanSupplier;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.input.MouseButtonInfo;
 
@@ -61,7 +62,10 @@ final class MouseDispatch {
     }
 
     private final Movement movement = new Movement();
+    private final HeldToggleBindings toggles;
     private final Set<Integer> persistent = new TreeSet<>(), held = new TreeSet<>();
+
+    MouseDispatch(HeldToggleBindings toggles) { this.toggles = toggles; }
 
     Map<String,String> inspectButtons() {
         var result = new TreeMap<String,String>();
@@ -122,13 +126,14 @@ final class MouseDispatch {
         }
     }
 
-    private void move(Minecraft mc, Movement.Delta step) {
+    private void move(Minecraft mc, Movement.Delta step, BooleanSupplier valid) {
         if (step.x() == 0 && step.y() == 0) return;
         var w = mc.getWindow();
         var m = mc.mouseHandler;
         // Vanilla discards the first movement after grabbing/resizing. Consume that baseline
         // with the current position so that this tick's actual displacement is preserved.
         m.onMove(w.handle(), m.xpos(), m.ypos(), 0, 0);
+        if (!valid.getAsBoolean()) return;
         if (m.isMouseGrabbed()) {
             m.onMove(w.handle(), m.xpos(), m.ypos(), step.x(), step.y());
         } else {
@@ -139,14 +144,18 @@ final class MouseDispatch {
             double y = Math.clamp(m.ypos() + step.y() * scaleY, 0, (target.height - 1) * scaleY);
             m.onMove(w.handle(), x, y, x - m.xpos(), y - m.ypos());
         }
-        m.handleAccumulatedMovement();
+        if (valid.getAsBoolean()) m.handleAccumulatedMovement();
     }
 
-    void tick(Minecraft mc, Actions actions, double cap, int modifiers) {
+    void tick(Minecraft mc, Actions actions, double cap, int modifiers, BooleanSupplier valid) {
+        if (!valid.getAsBoolean()) return;
         if (!pending() && held.isEmpty() && actions.moves.isEmpty() && actions.buttons.isEmpty()) return;
         if (!mc.isWindowActive()) throw new IllegalStateException("mouse input requires an active game window");
         for (var input : actions.moves) start(mc, input, cap);
-        if (pending()) move(mc, movement.advance(cap));
+        if (pending()) {
+            move(mc, movement.advance(cap), valid);
+            if (!valid.getAsBoolean()) return;
+        }
 
         var wanted = new TreeSet<>(persistent);
         actions.buttons.forEach((button, action) -> {
@@ -158,24 +167,28 @@ final class MouseDispatch {
                 if (action.equals("press")) persistent.add(button);
             }
         });
-        applyButtons(mc, wanted, modifiers);
+        applyButtons(mc, wanted, modifiers, valid);
     }
 
     void reset(Minecraft mc, int modifiers) {
         clearMoves();
         persistent.clear();
-        applyButtons(mc, Set.of(), modifiers);
+        applyButtons(mc, Set.of(), modifiers, () -> true);
     }
 
-    private void applyButtons(Minecraft mc, Set<Integer> wanted, int modifiers) {
+    private void applyButtons(Minecraft mc, Set<Integer> wanted, int modifiers, BooleanSupplier valid) {
         if (wanted.equals(held)) return;
         for (int button : new TreeSet<>(held)) {
-            if (!wanted.contains(button)) {
-                held.remove(button);
+            if (!valid.getAsBoolean()) return;
+            if (!wanted.contains(button) && held.remove(button)) {
+                toggles.update(mc, InputConstants.Type.MOUSE.getOrCreate(button), false);
                 mc.mouseHandler.onButton(mc.getWindow().handle(), new MouseButtonInfo(button, modifiers), InputConstants.RELEASE);
             }
         }
-        for (int button : wanted) if (held.add(button)) {
+        for (int button : wanted) {
+            if (!valid.getAsBoolean()) return;
+            if (!held.add(button)) continue;
+            toggles.update(mc, InputConstants.Type.MOUSE.getOrCreate(button), true);
             mc.mouseHandler.onButton(mc.getWindow().handle(), new MouseButtonInfo(button, modifiers), InputConstants.PRESS);
         }
     }

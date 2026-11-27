@@ -49,6 +49,7 @@ abstract class ClientLoop {
         GameBridge.sampleHandshake((Minecraft)(Object)this);
     }
 
+    // Ordinary stops wait for runTick to unwind, including any nested render during respawn.
     @Inject(method = "runTick", at = @At(value = "INVOKE",
         target = "Lnet/minecraft/client/Minecraft;renderFrame(Z)V", shift = At.Shift.AFTER))
     private void afterRender(boolean render, CallbackInfo ci) {
@@ -60,6 +61,7 @@ abstract class ClientLoop {
         target = "Lnet/minecraft/client/renderer/GameRenderer;render()V", shift = At.Shift.AFTER))
     private void inspectRenderedFrame(boolean tick, CallbackInfo ci) {
         var mc = (Minecraft)(Object)this;
+        Playback.INSTANCE.afterWorldTransitionRender(mc);
         GameInspection.afterRender(mc);
         if (!tick) GameBridge.sampleHandshake(mc);
     }

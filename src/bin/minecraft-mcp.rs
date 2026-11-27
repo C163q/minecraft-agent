@@ -271,6 +271,8 @@ fn stop_result(reply: &Value, include_screenshot: bool) -> Result<Value> {
         "pause_listeners",
         "events",
         "events_omitted",
+        "transition",
+        "screen",
     ] {
         if let Some(value) = reply.get(field) {
             status[field] = value.clone();
@@ -290,7 +292,7 @@ fn respond(request: &Value) -> Value {
             json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"minecraft-agent","version":env!("CARGO_PKG_VERSION")}})
         }
         Some("tools/list") => {
-            json!({"tools":[{"name":"input_script","description":"Run a keyboard and mouse input script from exactly one of script or path and return its stop status at PAUSE, a pause shortcut, or END. See docs/input-script/README.md.","inputSchema":{"type":"object","properties":{"script":{"type":"string"},"path":{"type":"string"},"include_screenshot":{"type":"boolean","default":true,"description":"Include the stopped frame as a PNG image."}},"additionalProperties":false}},queue::tool(),hints::tool(),game_state::tool()]})
+            json!({"tools":[{"name":"input_script","description":"Run a keyboard and mouse input script from exactly one of script or path and return the result at PAUSE, a pause shortcut, END, or a single-player save transition. See docs/input-script/README.md.","inputSchema":{"type":"object","properties":{"script":{"type":"string"},"path":{"type":"string"},"include_screenshot":{"type":"boolean","default":true,"description":"Include the stopped frame as a PNG image."}},"additionalProperties":false}},queue::tool(),hints::tool(),game_state::tool()]})
         }
         Some("ping") => json!({}),
         method => {
@@ -462,6 +464,23 @@ mod tests {
             );
         }
         assert!(stop_result(&status, true).is_err());
+    }
+
+    #[test]
+    fn transition_stop_returns_the_destination_screen_and_cleanup() {
+        for (direction, screen, world) in [
+            ("enter", Value::Null, "paused"),
+            ("leave", json!("TitleScreen"), "not_needed"),
+        ] {
+            let state = json!({"world":world,"ticks":1,"pause_reason":"world_changed",
+                "events":[],"screen":screen,"transition":{"direction":direction,
+                "status":"completed","input_cleared":true}});
+            let result = stop_result(&state, false).unwrap();
+            assert_eq!(
+                result,
+                json!({"content":[{"type":"text","text":state.to_string()}]})
+            );
+        }
     }
 
     #[test]

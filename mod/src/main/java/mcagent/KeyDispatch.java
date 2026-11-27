@@ -2,6 +2,7 @@ package mcagent;
 
 import com.mojang.blaze3d.platform.InputConstants;
 import java.util.*;
+import java.util.function.BooleanSupplier;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.input.KeyEvent;
 import org.lwjgl.sdl.SDLKeyboard;
@@ -9,6 +10,9 @@ import static org.lwjgl.sdl.SDLKeycode.*;
 
 final class KeyDispatch {
     private final Set<Integer> held = new LinkedHashSet<>();
+    private final HeldToggleBindings toggles;
+
+    KeyDispatch(HeldToggleBindings toggles) { this.toggles = toggles; }
 
     static int resolve(String name) {
         // Minecraft also accepts arbitrary numeric scancodes; script digits refer to the number row.
@@ -53,14 +57,24 @@ final class KeyDispatch {
     }
 
     void apply(Minecraft mc, Set<Integer> wanted) {
+        apply(mc, wanted, () -> true);
+    }
+
+    void apply(Minecraft mc, Set<Integer> wanted, BooleanSupplier valid) {
         if (wanted.equals(held)) return;
         // Release chord keys before modifiers. Press modifiers before chord keys.
         var released = held.stream().filter(k -> !wanted.contains(k))
             .sorted(Comparator.comparing(k -> modifier(k) != 0)).toList();
         var pressed = wanted.stream().filter(k -> !held.contains(k))
             .sorted(Comparator.comparing(k -> modifier(k) == 0)).toList();
-        for (int code : released) event(mc, code, false);
-        for (int code : pressed) event(mc, code, true);
+        for (int code : released) {
+            if (!valid.getAsBoolean()) return;
+            event(mc, code, false, valid);
+        }
+        for (int code : pressed) {
+            if (!valid.getAsBoolean()) return;
+            event(mc, code, true, valid);
+        }
     }
 
     short modifiers() {
@@ -69,8 +83,9 @@ final class KeyDispatch {
         return mods;
     }
 
-    private void event(Minecraft mc, int code, boolean press) {
+    private void event(Minecraft mc, int code, boolean press, BooleanSupplier valid) {
         if (press) held.add(code); else held.remove(code);
+        toggles.update(mc, InputConstants.Type.KEYBOARD.getOrCreate(code), press);
         short mods = modifiers();
         int logical = SDLKeyboard.SDL_GetKeyFromScancode(code, mods, false);
         long window = mc.getWindow().handle();
@@ -82,7 +97,7 @@ final class KeyDispatch {
             && SDLKeyboard.SDL_TextInputActive(window);
         mc.keyboardHandler.keyPress(window, press ? InputConstants.PRESS : InputConstants.RELEASE,
             new KeyEvent(code, logical, mods));
-        if (typing && mc.gui.screen() == screen && SDLKeyboard.SDL_TextInputActive(window))
+        if (typing && valid.getAsBoolean() && mc.gui.screen() == screen && SDLKeyboard.SDL_TextInputActive(window))
             mc.keyboardHandler.textInput(window, Character.toString(logical));
     }
 }

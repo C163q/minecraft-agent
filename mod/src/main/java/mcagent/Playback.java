@@ -9,8 +9,12 @@ import com.google.gson.JsonObject;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Screenshot;
+import net.minecraft.client.gui.screens.DisconnectedScreen;
+import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.server.IntegratedServer;
@@ -19,13 +23,14 @@ import net.minecraft.world.phys.Vec3;
 import net.minecraft.network.protocol.common.ClientboundPingPacket;
 import net.minecraft.network.protocol.game.ClientboundSetHealthPacket;
 
-/** Playback belongs to the client thread. Only the stop fence crosses to the server thread. */
+/** Playback belongs to the client thread. The server uses the fence, and IPC tracks transition delivery. */
 public final class Playback {
     public static final Playback INSTANCE = new Playback();
     public static final Identifier HURT_SIGNAL = Identifier.fromNamespaceAndPath("minecraft_agent", "hurt");
     private static final double DEFAULT_MAX_SPEED = 50;
-    private final KeyDispatch keys = new KeyDispatch();
-    private final MouseDispatch mouse = new MouseDispatch();
+    private final HeldToggleBindings toggles = new HeldToggleBindings();
+    private final KeyDispatch keys = new KeyDispatch(toggles);
+    private final MouseDispatch mouse = new MouseDispatch(toggles);
     private final InputQueue queue = new InputQueue();
     private final Map<String,Integer> codes = new HashMap<>();
     private ClientLevel level;
@@ -38,6 +43,8 @@ public final class Playback {
 
     // A request waits for its stopped frame. Manual playback has no requesting peer.
     private Request active;
+    private volatile WorldTransition transition;
+    private long nextTransitionToken, inputGeneration;
     private boolean running, inTick, appliedInput, hotkeyStop, resumeAfterCapture;
     private String pauseReason;
     private String lastError;
@@ -52,8 +59,15 @@ public final class Playback {
     private int nextMarker = new Random().nextInt();
 
     record Snapshot(ClientLevel level, Set<String> persistent) {}
+    record Transition(String direction, String status, boolean input_cleared) {}
     record Observation(long ticks, String world, String pauseReason, List<InputQueue.Origin> listeners,
-                       EventJournal.Report events, byte[] png, FrameCamera.View camera) {}
+                       EventJournal.Report events, byte[] png, FrameCamera.View camera,
+                       Transition transition, String screen) {
+        Observation(long ticks, String world, String pauseReason, List<InputQueue.Origin> listeners,
+                    EventJournal.Report events, byte[] png, FrameCamera.View camera) {
+            this(ticks, world, pauseReason, listeners, events, png, camera, null, null);
+        }
+    }
     record Held(Map<String,String> keys, Map<String,String> buttons) {}
     record InputState(String world, Held held, List<Movement.Pending<?>> moves, double max_speed_px_per_tick,
                       String pause_reason, String last_error, List<InputQueue.ActiveCall> active_calls,
@@ -62,13 +76,14 @@ public final class Playback {
 
     private record Fence(IntegratedServer server, int id) {}
     private static final class Request {
-        final CompletableFuture<Observation> result = new CompletableFuture<>();
+        final CompletableFuture<Observation> result;
         final EventJournal events = new EventJournal();
         final boolean includeScreenshot;
         long executed;
         long deathObservation;
 
-        Request(JsonObject program) {
+        Request(JsonObject program, CompletableFuture<Observation> result) {
+            this.result = result;
             var option = program.get("include_screenshot");
             if (option != null && !(option.isJsonPrimitive() && option.getAsJsonPrimitive().isBoolean()))
                 throw new IllegalArgumentException("include_screenshot must be a boolean");
@@ -81,11 +96,13 @@ public final class Playback {
     }
 
     Snapshot snapshot(Minecraft mc) {
+        settleRequest(mc);
         if (!supports(mc)) throw new IllegalStateException("requires a local single-player world or menu");
         return new Snapshot(mc.level, level == mc.level ? queue.persistent() : Set.of());
     }
 
     InputState inspect(Minecraft mc) {
+        settleRequest(mc);
         if (!supports(mc)) throw new IllegalStateException("requires a local single-player world or menu");
         boolean sameLevel = level == mc.level;
         String world = worldState(mc);
@@ -96,7 +113,8 @@ public final class Playback {
             queue.activeCalls(), queue.listeners(), queue.inspect());
     }
 
-    CompletableFuture<Observation> start(Minecraft mc, Snapshot snapshot, JsonObject program) {
+    void start(Minecraft mc, Snapshot snapshot, JsonObject program, CompletableFuture<Observation> result) {
+        if (result.isDone()) return;
         checkContext(mc);
         if (!screenshotPaths.isEmpty() || capturing) throw new IllegalStateException("a frame capture is completing");
         if (active != null || snapshot.level != mc.level || !supports(mc))
@@ -115,28 +133,31 @@ public final class Playback {
         double cap = program.has("max_speed") ? program.get("max_speed").getAsDouble() : DEFAULT_MAX_SPEED;
         if (!Double.isFinite(cap) || cap <= 0) throw new IllegalArgumentException("max_speed must be finite and positive");
         var block = InputQueue.Block.read(program, resolved.keySet());
-        var request = new Request(program);
+        var request = new Request(program, result);
+        if (result.isDone()) return;
         queue.submit(block);
         codes.putAll(resolved);
         maxSpeed = cap;
         active = request;
         resume(mc);
-        return request.result;
     }
 
     String worldState(Minecraft mc) {
         if (mc.level == null || mc.gui.isPausing()) return "not_needed";
-        if (level == mc.level && freeze && mc.isPaused()) return "paused";
+        if (level == mc.level && frozen() && mc.isPaused()) return "paused";
         return mc.isPaused() ? "not_needed" : "unpaused";
     }
 
-    public boolean frozen() { return freeze; }
+    public boolean frozen() {
+        var wait = transition;
+        return freeze && (wait == null || !wait.abandoned());
+    }
     public boolean worldActionsPaused(Minecraft mc) {
         // After resume(), vanilla's pause flag can survive until the next frame.
-        return mc.level != null && (freeze || (running && mc.isPaused() && !mc.gui.isPausing()));
+        return mc.level != null && (frozen() || (running && mc.isPaused() && !mc.gui.isPausing()));
     }
     public boolean showPauseIndicator(Minecraft mc) {
-        return pauseConfirmed && freeze && level == mc.level && mc.isPaused() && !mc.gui.isPausing();
+        return pauseConfirmed && frozen() && level == mc.level && mc.isPaused() && !mc.gui.isPausing();
     }
 
     private boolean nativeEndReleased(Minecraft mc) {
@@ -145,7 +166,36 @@ public final class Playback {
 
     public boolean keyDown(int code) { return keys.isDown(code); }
 
+    private void settleRequest(Minecraft mc) {
+        var wait = transition;
+        if (wait == null) {
+            if (active != null && active.result.isCompletedExceptionally()) reset(mc, "input request ended");
+            return;
+        }
+        if (wait.abandoned()) {
+            reset(mc, "input request ended");
+        } else if (wait.deliveryConfirmed()) {
+            active = null;
+            transition = null;
+            if (!freeze) pauseReason = null;
+            if (resumeAfterCapture) resume(mc);
+        }
+    }
+
     public void checkContext(Minecraft mc) {
+        settleRequest(mc);
+        if (transition != null) {
+            if (!supports(mc)) {
+                reset(mc, "world changed during input session");
+            } else {
+                if (mc.level != level) {
+                    releaseTransitionPause();
+                    level = mc.level;
+                    contactPlayer = null;
+                }
+                return;
+            }
+        }
         if (mc.level != level || ((running || pauseReason != null || active != null) && !supports(mc))) {
             reset(mc, "world changed during input session");
             level = mc.level;
@@ -156,16 +206,31 @@ public final class Playback {
         }
     }
 
-    void cancel(Minecraft mc, CompletableFuture<Observation> result) {
-        if (active != null && active.result == result) reset(mc, "client disconnected");
+    void expireTransition(CompletableFuture<Observation> result) {
+        var wait = transition;
+        if (wait != null) wait.expire(result, System.nanoTime());
+    }
+
+    void finishDelivery(CompletableFuture<Observation> result, boolean delivered) {
+        if (!delivered) result.cancel(false);
+        var wait = transition;
+        if (wait != null) wait.finishDelivery(result, delivered);
     }
 
     private void reset(Minecraft mc, String reason) {
         var old = active;
         active = null;
-        running = inTick = appliedInput = hotkeyStop = resumeAfterCapture = false;
-        freeze = pauseConfirmed = endInNativeMenu = false;
+        transition = null;
+        clearInput(mc);
         pauseReason = null;
+        if (old != null) old.result.completeExceptionally(new IllegalStateException(reason));
+    }
+
+    private void clearInput(Minecraft mc) {
+        running = inTick = appliedInput = hotkeyStop = resumeAfterCapture = false;
+        simulatingPlayer = false;
+        inputGeneration++;
+        freeze = pauseConfirmed = endInNativeMenu = false;
         lastError = null;
         pauseListeners = List.of();
         screenshotPaths = List.of();
@@ -177,7 +242,43 @@ public final class Playback {
         maxSpeed = DEFAULT_MAX_SPEED;
         mouse.reset(mc, keys.modifiers());
         keys.apply(mc, Set.of());
-        if (old != null) old.result.completeExceptionally(new IllegalStateException(reason));
+    }
+
+    /** Claims a native operation invoked during input dispatch or the resulting vanilla tick. */
+    public long beginWorldTransition(Minecraft mc, String direction) {
+        var request = active;
+        if (transition != null || request == null || request.result.isDone() || !appliedInput) return 0;
+        var wait = new WorldTransition(++nextTransitionToken, direction, request.result, System.nanoTime());
+        transition = wait;
+        request.executed++;
+        pauseReason = "world_changed";
+        toggles.clearForWorldChange();
+        clearInput(mc);
+        return wait.token;
+    }
+
+    public boolean transitionActive(long token) {
+        var wait = transition;
+        return wait != null && wait.accepts(token, System.nanoTime());
+    }
+
+    public void transitionOutcome(long token, String status) {
+        transitionOutcome(token, status, null);
+    }
+
+    public void transitionOutcome(long token, String status, Screen expectedScreen) {
+        var wait = transition;
+        if (wait == null || !wait.signal(token, status, System.nanoTime())) return;
+        wait.expectedScreen = expectedScreen;
+        if (wait.direction.equals("enter") && wait.nativeCompleted()) {
+            wait.entryServer = Minecraft.getInstance().getSingleplayerServer();
+        }
+    }
+
+    private void releaseTransitionPause() {
+        freeze = pauseConfirmed = renderReady = false;
+        fence.set(null);
+        nextMarker++;
     }
 
     /** Called on the game thread for a physical or scripted press of the configured binding. */
@@ -244,7 +345,7 @@ public final class Playback {
     public boolean beforeTick(Minecraft mc) {
         checkContext(mc);
         if (running && queue.hasObserved()) resolveControls(mc);
-        if (freeze && !mc.isPaused()) return false; // Suppress catch-up ticks in the stopping frame.
+        if (frozen() && !mc.isPaused()) return false; // Suppress catch-up ticks in the stopping frame.
         if (mc.isPaused() && !mc.gui.isPausing()) return true;
         simulatingPlayer = !mc.isPaused() && mc.player != null;
         if (simulatingPlayer) {
@@ -255,20 +356,29 @@ public final class Playback {
         inTick = true;
         if (!running || (queue.isEmpty() && keys.isEmpty() && !mouse.active())) return true;
         var input = queue.input();
+        var request = active;
+        long generation = ++inputGeneration;
+        BooleanSupplier valid = () -> appliedInput && inputGeneration == generation
+            && (request == null || !request.result.isDone());
+        appliedInput = true;
         try {
             var target = new TreeSet<Integer>();
             for (var name : input.held()) target.add(codes.get(name));
-            keys.apply(mc, target);
-            mouse.tick(mc, input.mouse(), maxSpeed, keys.modifiers());
-            appliedInput = true;
+            keys.apply(mc, target, valid);
+            if (valid.getAsBoolean()) mouse.tick(mc, input.mouse(), maxSpeed, keys.modifiers(), valid);
         } catch (RuntimeException error) {
-            reset(mc, "line " + input.line() + ": " + error.getMessage());
+            if (valid.getAsBoolean()) reset(mc, "line " + input.line() + ": " + error.getMessage());
+            else if (request != null) request.result.completeExceptionally(error);
         }
         return true;
     }
 
     public void afterTick(Minecraft mc) {
         simulatingPlayer = false;
+        if (active != null && active.result.isCompletedExceptionally()) {
+            checkContext(mc);
+            return;
+        }
         if (!inTick) return;
         inTick = false;
         if (appliedInput) {
@@ -329,13 +439,96 @@ public final class Playback {
     }
 
     public void marker(int id) {
-        if (pauseReason != null && nextMarker == id) {
-            pauseConfirmed = freeze;
+        if (frozen() && nextMarker == id) {
+            pauseConfirmed = true;
             renderReady = true;
         }
     }
 
+    private void afterTransitionRender(Minecraft mc, WorldTransition wait, Request request) {
+        long now = System.nanoTime();
+        wait.expire(request.result, now);
+        if (wait.observed || wait.result.isDone()) return;
+        boolean entering = wait.direction.equals("enter");
+        var screen = mc.gui.screen();
+        boolean visible = mc.gui.overlay() == null;
+        if (entering && wait.nativeCompleted() && screen instanceof DisconnectedScreen) {
+            wait.signal(wait.token, "failed", now);
+        }
+        boolean ready;
+        if (entering) {
+            var connection = mc.getConnection();
+            ready = visible && screen == null && mc.level != null && mc.player != null && mc.gameMode != null
+                && connection != null && connection.hasClientLoaded() && connection.getLevel() == mc.level
+                && connection.getConnection().isConnected()
+                && wait.entryServer != null && wait.entryServer == mc.getSingleplayerServer();
+        } else {
+            ready = visible && screen instanceof TitleScreen && mc.level == null && mc.player == null
+                && mc.getSingleplayerServer() == null && (wait.expectedScreen == null || screen == wait.expectedScreen);
+        }
+        String status = wait.frameStatus(now, ready && (!entering || (freeze && renderReady && mc.isPaused())),
+            visible && (wait.expectedScreen == null || screen == wait.expectedScreen));
+        if (status == null) {
+            if (entering && ready && wait.nativeCompleted() && !freeze) stop(mc, "world_changed");
+            else if (!ready && freeze) releaseTransitionPause();
+            return;
+        }
+        if (!status.equals("completed") && freeze) {
+            releaseTransitionPause();
+            wait.releasingPause = true;
+        }
+        // runTick updates vanilla's pause flag after rendering. Wait for a frame after that update.
+        if (wait.releasingPause && mc.level != null && mc.isPaused() && !mc.gui.isPausing()) return;
+        wait.observed = true;
+        String world = worldState(mc);
+        renderReady = false;
+        var events = request.events.seal();
+        var report = new Transition(wait.direction, status, true);
+        String inputScreen = GameInspection.screenName(mc);
+        if (!request.includeScreenshot) {
+            request.result.complete(new Observation(request.executed, world, "world_changed", List.of(), events,
+                null, null, report, inputScreen));
+            return;
+        }
+        // Native loading and saving can discard queued client tasks. Only the frozen frame data crosses threads.
+        long ticks = request.executed;
+        try {
+            var camera = FrameCamera.snapshot(mc);
+            Screenshot.takeScreenshot(mc.gameRenderer.mainRenderTarget(), image -> {
+                if (request.result.isDone()) {
+                    image.close();
+                    return;
+                }
+                try {
+                    CompletableFuture.runAsync(() -> {
+                        try (image) {
+                            if (!request.result.isDone()) {
+                                byte[] png = FrameFiles.encode(image, List.of());
+                                request.result.complete(new Observation(ticks, world, "world_changed", List.of(),
+                                    events, png, camera, report, inputScreen));
+                            }
+                        } catch (IOException | RuntimeException failure) {
+                            request.result.completeExceptionally(failure);
+                        }
+                    });
+                } catch (RuntimeException failure) {
+                    image.close();
+                    request.result.completeExceptionally(failure);
+                }
+            });
+        } catch (RuntimeException failure) {
+            request.result.completeExceptionally(failure);
+        }
+    }
+
+    public void afterWorldTransitionRender(Minecraft mc) {
+        if (transition == null) return;
+        checkContext(mc);
+        if (transition != null) afterTransitionRender(mc, transition, active);
+    }
+
     public void afterRender(Minecraft mc) {
+        if (transition != null) return;
         checkContext(mc);
         var r = active;
         if (r == null && screenshotPaths.isEmpty()) {

@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.Base64;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import net.fabricmc.api.ClientModInitializer;
 import net.minecraft.client.Minecraft;
@@ -100,7 +101,8 @@ public final class GameBridge implements ClientModInitializer {
                     default -> throw new IllegalArgumentException("unknown operation");
                 };
             } else {
-                response = play(mc, engine, peer, snapshot, program);
+                play(mc, engine, peer, snapshot, program);
+                return;
             }
         } catch (Exception e) {
             Throwable cause = e;
@@ -136,8 +138,8 @@ public final class GameBridge implements ClientModInitializer {
         }
     }
 
-    private static JsonObject inspectInput(Minecraft mc, Playback engine, JsonObject program) {
-        var state = mc.submit(() -> engine.inspect(mc)).join();
+    private static JsonObject inspectInput(Minecraft mc, Playback engine, JsonObject program) throws Exception {
+        var state = mc.submit(() -> engine.inspect(mc)).get(IPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         var reply = JSON.toJsonTree(state).getAsJsonObject();
         if (!program.has("queue_version")) {
             reply.remove("queue_entries");
@@ -171,25 +173,44 @@ public final class GameBridge implements ClientModInitializer {
         }
     }
 
-    private static String play(Minecraft mc, Playback engine, SocketChannel peer,
+    private static void play(Minecraft mc, Playback engine, SocketChannel peer,
                                Playback.Snapshot snapshot, JsonObject program) throws Exception {
-        var result = mc.submit(() -> engine.start(mc, snapshot, program)).join();
-        var probe = ByteBuffer.allocate(1);
-        Playback.Observation frame;
-        while (true) {
+        var result = new CompletableFuture<Playback.Observation>();
+        var waitingToStart = new AtomicBoolean(true);
+        // A native world transition may drop queued tasks before acceptance.
+        long startDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(IPC_TIMEOUT_SECONDS);
+        mc.execute(() -> {
+            if (!waitingToStart.compareAndSet(true, false) || result.isDone()) return;
             try {
-                frame = result.get(100, TimeUnit.MILLISECONDS);
-                break;
-            } catch (TimeoutException pending) {
-                try {
-                    if (peer.read(probe) != 0) throw new EOFException("client disconnected or sent a second submission");
-                } catch (IOException error) {
-                    mc.submit(() -> engine.cancel(mc, result)).join();
-                    throw error;
-                }
+                engine.start(mc, snapshot, program, result);
+            } catch (RuntimeException failure) {
+                result.completeExceptionally(failure);
             }
+        });
+        var probe = ByteBuffer.allocate(1);
+        boolean delivered = false;
+        try {
+            while (true) {
+                Playback.Observation frame;
+                try {
+                    frame = result.get(100, TimeUnit.MILLISECONDS);
+                } catch (TimeoutException pending) {
+                    if (peer.read(probe) != 0) throw new EOFException("client disconnected or sent a second submission");
+                    if (System.nanoTime() - startDeadline >= 0 && waitingToStart.compareAndSet(true, false))
+                        throw new IOException("timed out before the game accepted the input script");
+                    engine.expireTransition(result);
+                    continue;
+                }
+                if (frame.transition() != null && peer.read(probe) != 0)
+                    throw new EOFException("client closed before the transition frame was returned");
+                send(peer, playReply(frame));
+                delivered = true;
+                return;
+            }
+        } finally {
+            result.cancel(false);
+            engine.finishDelivery(result, delivered);
         }
-        return playReply(frame);
     }
 
     static String playReply(Playback.Observation frame) {
@@ -197,6 +218,10 @@ public final class GameBridge implements ClientModInitializer {
         reply.addProperty("world", frame.world());
         reply.addProperty("ticks", frame.ticks());
         reply.addProperty("pause_reason", frame.pauseReason());
+        if (frame.transition() != null) {
+            reply.add("transition", JSON.toJsonTree(frame.transition()));
+            reply.addProperty("screen", frame.screen());
+        }
         if (!frame.listeners().isEmpty()) reply.add("pause_listeners", JSON.toJsonTree(frame.listeners()));
         var events = new JsonArray();
         for (var event : frame.events().entries()) {

@@ -71,11 +71,15 @@ public final class GameInspection {
         }
     }
 
-    private static JsonObject sample(Minecraft mc) {
+    static String screenName(Minecraft mc) {
         var overlay = mc.gui.overlay();
         var screen = mc.gui.screen();
-        String inputScreen = overlay != null ? overlay.getClass().getSimpleName()
+        return overlay != null ? overlay.getClass().getSimpleName()
             : screen != null ? screen.getClass().getSimpleName() : null;
+    }
+
+    private static JsonObject sample(Minecraft mc) {
+        String inputScreen = screenName(mc);
         boolean hasPlayer = mc.level != null && mc.player != null;
         var state = new JsonObject();
         state.addProperty("world", Playback.INSTANCE.worldState(mc));
