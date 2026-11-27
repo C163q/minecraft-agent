@@ -266,11 +266,15 @@ fn stop_result(reply: &Value, include_screenshot: bool) -> Result<Value> {
         .as_str()
         .ok_or("missing or invalid stop world state")?;
     let mut status = json!({"ticks":ticks, "world":world});
-    if let Some(reason) = reply.get("pause_reason") {
-        status["pause_reason"] = reason.clone();
-    }
-    if let Some(origins) = reply.get("pause_listeners") {
-        status["pause_listeners"] = origins.clone();
+    for field in [
+        "pause_reason",
+        "pause_listeners",
+        "events",
+        "events_omitted",
+    ] {
+        if let Some(value) = reply.get(field) {
+            status[field] = value.clone();
+        }
     }
     if !include_screenshot {
         return Ok(json!({"content":[{"type":"text","text":status.to_string()}]}));
@@ -461,15 +465,37 @@ mod tests {
     }
 
     #[test]
+    fn stop_reports_observed_events_with_and_without_a_screenshot() {
+        let events = json!([{"event":"BlockInteracted","item":null,"before":{"open":false},
+            "after":{"open":true},"listeners":[{"event":"BlockInteracted","block":1,"line":2}]}]);
+        let mut reply = json!({"world":"paused","ticks":4,"events":events,"events_omitted":2});
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::new(2, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        reply["png"] = json!(base64_simd::STANDARD.encode_to_string(png.get_ref()));
+        for image in [false, true] {
+            let result = stop_result(&reply, image).unwrap();
+            let status: Value =
+                serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(status["events"], events);
+            assert_eq!(status["events_omitted"], 2);
+        }
+    }
+
+    #[test]
     fn extended_events_require_an_advertised_name() {
-        let script = Script::parse("BEGIN\nON(Death)\nBEGIN\nPAUSE\nEND\nEND").unwrap();
-        let program = script.compile(Default::default());
-        let mut hello = json!({"input_events":true});
-        assert!(check_game_support(&program, &hello).is_err());
-        hello["event_names"] = json!(["CollideX", "CollideZ"]);
-        assert!(check_game_support(&program, &hello).is_err());
-        hello["event_names"] = json!(["Death"]);
-        assert!(check_game_support(&program, &hello).is_ok());
+        for event in ["Death", "BlockInteracted"] {
+            let script =
+                Script::parse(&format!("BEGIN\nON({event})\nBEGIN\nPAUSE\nEND\nEND")).unwrap();
+            let program = script.compile(Default::default());
+            let mut hello = json!({"input_events":true});
+            assert!(check_game_support(&program, &hello).is_err());
+            hello["event_names"] = json!(["CollideX", "CollideZ"]);
+            assert!(check_game_support(&program, &hello).is_err());
+            hello["event_names"] = json!([event]);
+            assert!(check_game_support(&program, &hello).is_ok());
+        }
     }
 
     #[test]

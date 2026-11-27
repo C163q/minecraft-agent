@@ -367,7 +367,19 @@ fn parse_block<'a>(
             }
             let (_, name, rest) = next_command(code).map_err(error)?;
             if !rest.is_empty()
-                || !matches!(name, "Hurt" | "HpLost" | "Death" | "CollideX" | "CollideZ")
+                || !matches!(
+                    name,
+                    "Hurt"
+                        | "HpLost"
+                        | "Death"
+                        | "CollideX"
+                        | "CollideZ"
+                        | "BlockBroken"
+                        | "LeftGround"
+                        | "ScreenOpened"
+                        | "DamageBlocked"
+                        | "BlockInteracted"
+                )
             {
                 return Err(error(format!(
                     "invalid ON declaration {code:?}: expected one supported event on its own line"

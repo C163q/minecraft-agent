@@ -221,8 +221,17 @@ fn explicit_screenshot_is_zero_ticks_and_accepts_quoted_paths() {
 }
 
 #[test]
-fn player_death_and_axis_collisions_compile_as_distinct_listeners() {
-    for name in ["Death", "CollideX", "CollideZ"] {
+fn player_events_compile_as_distinct_listeners() {
+    for name in [
+        "Death",
+        "CollideX",
+        "CollideZ",
+        "BlockBroken",
+        "LeftGround",
+        "ScreenOpened",
+        "DamageBlocked",
+        "BlockInteracted",
+    ] {
         let script = Script::parse(&format!(
             "BEGIN\nON({name})\nBEGIN\nPAUSE\nEND\nWait(4)\nEND"
         ))
