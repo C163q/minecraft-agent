@@ -78,3 +78,7 @@ PAUSE 和跨块覆盖需要同时更新 MCP 与 Mod。旧 MCP 发送每拍的目
 `AcceptedHurt` 在原版接受本地玩家伤害后沿同一游戏连接通知客户端；`PlayerHealth` 从当前玩家的普通生命值字段和初始同步建立基线。显式截图沿用停止帧确认；已读回的像素在后台编码，一份 PNG 同时用于文件和 MCP。图像写盘错误通过工具结果返回。
 
 死亡通知由 `PlayerDeath` 在原版选择死亡界面或立即重生之前观察。`PlayerCollision` 取本地玩家碰撞求解的输入、输出向量，沿用原版容差比较世界 X、Z 分量。`Playback` 按实际模拟拍保留接触状态，分别检测每轴开始受阻的边沿。
+
+`PlayerGround` 比较本地玩家模拟前后的接地标志。`OpenedScreen` 在原版 GUI 实际赋值后按界面对象识别进入事件。[服务端动作通知](../../mod/src/main/java/mcagent/ServerActionEvents.java)在本地玩家挖掘实际移除方块、方块使用返回受理、物品格挡正数伤害时固定现场字段，并沿游戏连接传送。客户端根据收到通知时的监听决定是否派发。
+
+每个工具请求拥有独立的[事件记录](../../mod/src/main/java/mcagent/EventJournal.java)。队列在接受通知时一次性保存本次被触发的监听来源，`Playback.afterRender` 在最终停止帧封存结果。中间截图和已经退出的函数都可能出现在一次调用的执行过程中，记录的生命周期由工具请求决定。使用示例与字段见[玩家事件与监听](../input-script/events.md)。

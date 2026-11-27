@@ -15,6 +15,7 @@ root = Path(__file__).resolve().parents[2]
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(root / "mod"))
 from build import build_jar, game_classpath
+from action_events import exercise_action_events
 from game_state import exercise_game, exercise_game_exit, inspect_title
 from mouse import exercise_mouse
 from PIL import Image
@@ -233,6 +234,7 @@ def exercise(client, work, log, codex_env, wait_ready):
     exercise_functions(work, log, play, rpc, block, inspect)
     from imports import exercise_imports
     exercise_imports(work, play, rpc, block, inspect)
+    exercise_action_events(work, log, play, rpc, block, inspect)
     from events import exercise_events
     exercise_events(work, log, play, rpc, block, inspect, codex_env)
     exercise_game_exit(work, rpc)

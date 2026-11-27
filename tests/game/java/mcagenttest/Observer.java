@@ -25,8 +25,9 @@ import static org.lwjgl.sdl.SDLEvents.*;
 
 public final class Observer implements ClientModInitializer {
     public static volatile boolean recording, slow, measureWorld;
-    public static long frame;
+    public static long frame, clientTick;
     private final InspectFixture inspectFixture = new InspectFixture();
+    private final ActionFixture actionFixture = new ActionFixture();
 
     private void await(BooleanSupplier condition) throws Exception {
         await(condition, 100);
@@ -100,6 +101,19 @@ public final class Observer implements ClientModInitializer {
             }
             if (command[0].equals("inspect-fixture")) {
                 inspectFixture.apply(mc, command[1]);
+                Files.delete(request);
+                return;
+            }
+            if (command[0].equals("action-fixture")) {
+                if (command[1].equals("wait-paused-ticks")) {
+                    long first = mc.submit(() -> clientTick).join();
+                    await(() -> mc.submit(() -> {
+                        if (!mc.isPaused()) throw new AssertionError("client left its paused state");
+                        return clientTick - first >= 8;
+                    }).join(), 3);
+                } else {
+                    actionFixture.apply(mc, command[1]);
+                }
                 Files.delete(request);
                 return;
             }

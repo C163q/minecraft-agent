@@ -18,6 +18,11 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 abstract class Frames {
     @Unique private boolean capturedRunningFrame;
 
+    @Inject(method="tick", at=@At("HEAD"))
+    private void countTick(CallbackInfo ci) {
+        Observer.clientTick++;
+    }
+
     @Inject(method="renderFrame", at=@At("HEAD"))
     private void closeTransientMenu(CallbackInfo ci) throws IOException {
         var mc = (Minecraft)(Object)this;

@@ -1,4 +1,4 @@
 {
   "required":true, "package":"mcagenttest.mixin", "compatibilityLevel":"JAVA_25",
-  "client":["Sample","Events","Frames","StopHealth","MouseEvents","Container"], "injectors":{"defaultRequire":1}
+  "client":["Sample","Events","Frames","StopHealth","MouseEvents","Container","BlockUses"], "injectors":{"defaultRequire":1}
 }

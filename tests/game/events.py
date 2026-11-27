@@ -67,6 +67,7 @@ def exercise_events(work, log, play, rpc, block, inspect, codex_env=None):
     hit("client-drop")
     result = send(both, 1)
     assert [o["line"] for o in result["pause_listeners"]] == [2, 6], result
+    assert result["events"] == [{"event": "HpLost", "listeners": result["pause_listeners"]}], result
 
     for mode, event, expected, server_result in [
             ("micro", "HpLost", True, "micro true"),
@@ -117,7 +118,7 @@ def exercise_events(work, log, play, rpc, block, inspect, codex_env=None):
 
     hit("late-drop")
     status = send([*handler("HpLost", "Key(s)"), "Key(w) PAUSE"], 1)
-    assert status["pause_reason"] == "pause" and not origins(status)
+    assert status["pause_reason"] == "pause" and not origins(status) and status["events"] == [], status
     state = inspect()
     assert state["listeners"] == [] and state["queue"]["total"] == 0
     assert "AGENT_LATE_DROP" in log.read_text()
