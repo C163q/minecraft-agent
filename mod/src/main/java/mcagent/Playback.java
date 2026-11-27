@@ -40,6 +40,7 @@ public final class Playback {
     private Request active;
     private boolean running, inTick, appliedInput, hotkeyStop, resumeAfterCapture;
     private String pauseReason;
+    private String lastError;
     private List<InputQueue.Origin> pauseListeners = List.of();
     private List<Path> screenshotPaths = List.of();
     private long captureGeneration;
@@ -55,7 +56,9 @@ public final class Playback {
                        byte[] png, FrameCamera.View camera) {}
     record Held(Map<String,String> keys, Map<String,String> buttons) {}
     record InputState(String world, Held held, List<Movement.Pending<?>> moves, double max_speed_px_per_tick,
-                      String pause_reason, List<InputQueue.ListenerState> listeners, List<InputQueue.Entry> queue_entries) {}
+                      String pause_reason, String last_error, List<InputQueue.ActiveCall> active_calls,
+                      List<InputQueue.ListenerState> listeners,
+                      List<InputQueue.Entry> queue_entries) {}
 
     private record Fence(IntegratedServer server, int id) {}
     private static final class Request {
@@ -85,9 +88,11 @@ public final class Playback {
         if (!supports(mc)) throw new IllegalStateException("requires a local single-player world or menu");
         boolean sameLevel = level == mc.level;
         String world = worldState(mc);
-        if (!sameLevel) return new InputState(world, new Held(Map.of(), Map.of()), List.of(), DEFAULT_MAX_SPEED, null, List.of(), List.of());
+        if (!sameLevel) return new InputState(world, new Held(Map.of(), Map.of()), List.of(), DEFAULT_MAX_SPEED,
+            null, null, null, List.of(), List.of());
         return new InputState(world, new Held(keys.inspect(queue.persistent()), mouse.inspectButtons()),
-            mouse.inspectMoves(), maxSpeed, nativeEndReleased(mc) ? null : pauseReason, queue.listeners(), queue.inspect());
+            mouse.inspectMoves(), maxSpeed, nativeEndReleased(mc) ? null : pauseReason, lastError,
+            queue.activeCalls(), queue.listeners(), queue.inspect());
     }
 
     CompletableFuture<Observation> start(Minecraft mc, Snapshot snapshot, JsonObject program) {
@@ -156,6 +161,7 @@ public final class Playback {
         running = inTick = appliedInput = hotkeyStop = resumeAfterCapture = false;
         freeze = pauseConfirmed = endInNativeMenu = false;
         pauseReason = null;
+        lastError = null;
         pauseListeners = List.of();
         screenshotPaths = List.of();
         renderReady = capturing = false;
@@ -189,6 +195,7 @@ public final class Playback {
         renderReady = false;
         freeze = pauseConfirmed = endInNativeMenu = resumeAfterCapture = false;
         pauseReason = null;
+        lastError = null;
         fence.set(null);
         resolveControls(mc);
     }
@@ -196,7 +203,8 @@ public final class Playback {
     public long observe(Minecraft mc, String event) {
         if (mc.level == null || mc.level != level || !supports(mc)) return 0;
         long observation = queue.observe(event);
-        if (observation != 0 && active != null && event.equals("Death")) active.deathObservation = observation;
+        if (active != null && event.equals("Death") && queue.foregroundObserved(observation))
+            active.deathObservation = observation;
         return observation;
     }
 
@@ -265,7 +273,16 @@ public final class Playback {
     }
 
     private void resolveControls(Minecraft mc) {
-        String boundary = queue.controls(mouse::pending, mouse::clearMoves);
+        String boundary;
+        try {
+            boundary = queue.controls(mouse::pending, mouse::clearMoves);
+        } catch (InputQueue.FunctionLimit failure) {
+            lastError = failure.getMessage();
+            hotkeyStop = false;
+            screenshotPaths = queue.takeScreenshots();
+            stop(mc, "error");
+            return;
+        }
         if (hotkeyStop) {
             hotkeyStop = false;
             if (queue.pauseListeners().isEmpty()) boundary = "hotkey";
@@ -320,7 +337,7 @@ public final class Playback {
         String world = worldState(mc);
         String reason = pauseReason;
         boolean intermediate = "capture".equals(reason);
-        boolean returnImage = r != null && r.includeScreenshot && !intermediate;
+        boolean returnImage = r != null && r.includeScreenshot && !intermediate && lastError == null;
         if (!returnImage && screenshotPaths.isEmpty()) {
             completeStop(mc, r, world, reason, null, null);
             return;
@@ -362,6 +379,12 @@ public final class Playback {
         screenshotPaths = List.of();
         capturing = resumeAfterCapture = false;
         if ("capture".equals(pauseReason)) pauseReason = "pause";
+        if (lastError != null) {
+            lastError += "; screenshot failed: " + failure;
+            var combined = new IllegalStateException(lastError);
+            combined.addSuppressed(failure);
+            failure = combined;
+        }
         if (request != null) request.result.completeExceptionally(failure);
         else LoggerFactory.getLogger("minecraft-agent").warn("Frame capture failed", failure);
         if (endInNativeMenu && mc.gui.isPausing()) freeze = false;
@@ -370,7 +393,10 @@ public final class Playback {
     private void completeStop(Minecraft mc, Request r, String world, String reason, byte[] png, FrameCamera.View camera) {
         active = null;
         if (endInNativeMenu && world.equals("not_needed") && mc.gui.isPausing()) freeze = false;
-        if (r != null) r.result.complete(new Observation(r.executed, world, reason, pauseListeners, png, camera));
+        if (r != null) {
+            if (lastError != null) r.result.completeExceptionally(new IllegalStateException(lastError));
+            else r.result.complete(new Observation(r.executed, world, reason, pauseListeners, png, camera));
+        }
         if (resumeAfterCapture) resume(mc);
     }
 }

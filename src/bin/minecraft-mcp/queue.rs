@@ -129,12 +129,15 @@ impl Snapshot {
     fn export(self, path: &Path) -> Result<Value> {
         let path = std::path::absolute(path)?;
         let total = self.entries.len();
-        let summary = json!({
+        let mut summary = json!({
             "world": self.state["world"], "pause_reason": self.state["pause_reason"],
             "held": self.state["held"], "max_speed_px_per_tick": self.state["max_speed_px_per_tick"],
             "move_count": self.state["moves"].as_array().ok_or("missing movement snapshot")?.len(),
             "queue": {"total":total, "path":path}
         });
+        if let Some(error) = self.state.get("last_error") {
+            summary["last_error"] = error.clone();
+        }
         let mut state = self.state;
         state["queue"] = json!({"total":total,"next_cursor":null});
         state["queue"]["entries"] = Value::Array(self.entries);
@@ -264,6 +267,7 @@ mod tests {
         let args = json!({"queue":"file","path":path});
         let reply = inspect(Some(&args), || {
             let mut state = live()?;
+            state["last_error"] = json!("block 1: function depth exceeded");
             state["moves"] =
                 json!([{"remaining_px":{"x":110,"y":0},"requested_speed_px_per_tick":80}]);
             Ok(state)
@@ -281,6 +285,7 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         assert_eq!(again, exported);
         assert_eq!(reply["move_count"], 1);
+        assert_eq!(reply["last_error"], exported["last_error"]);
         assert!(reply.get("moves").is_none());
         assert_eq!(exported["moves"][0]["remaining_px"]["x"], 110);
     }

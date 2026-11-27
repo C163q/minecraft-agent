@@ -1,5 +1,6 @@
 """Check actual event delivery, queue origins and explicit frame persistence over stdio."""
 import json
+from textwrap import dedent
 
 
 def exercise_events(work, log, play, rpc, block, inspect, codex_env=None):
@@ -137,12 +138,34 @@ def exercise_events(work, log, play, rpc, block, inspect, codex_env=None):
     # The death packet belongs to the Nether; immediate respawn replaces the client level.
     send(["Wait(35)"], 35)
     hit("lethal-immediate")
-    response = send([*handler("Death", "PAUSE", "Key(s)"), "Wait(100)"],
-                    name="cross-dimension-death", image=True)
+    response = play({"script": dedent("""\
+        FUNCTION $after_death
+        BEGIN
+            KeyPress(j)
+            RETURN
+            KeyPress(q)
+        END
+        FUNCTION $watch_death
+        BEGIN
+            ON(Death)
+            BEGIN
+                PAUSE
+                $after_death()
+                RETURN
+                KeyPress(b)
+            END
+            Wait(100)
+        END
+        BEGIN
+            $watch_death()
+            KeyPress(v)
+        END
+    """)}, None, "cross-dimension-death")
     assert origins(response) == ["Death"] and response["world"] == "paused", response
-    send(["Wait(1)"], 1)
-    assert inspect()["held"]["keys"] == {"s": "temporary"}
+    resumed = send(["Wait(1)", "Key(k)"], 2)
+    assert resumed["pause_reason"] == "end" and inspect()["held"]["keys"] == {"j": "persistent", "k": "temporary"}
     assert inspect()["listeners"] == [] and inspect()["queue"]["total"] == 0
+    send(["KeyRelease(j)"], 1)
     # A later tool call must never finish against a handler belonging to the earlier death.
     hit("change-level")
     moved = rpc("tools/call", {"name": "input_script", "arguments":

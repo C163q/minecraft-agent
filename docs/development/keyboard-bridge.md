@@ -65,6 +65,8 @@ python3 tests/game/run.py /absolute/game-root/versions/26.3-Fabric/26.3-Fabric.j
 
 PAUSE 和跨块覆盖需要同时更新 MCP 与 Mod。旧 MCP 发送每拍的目标键集合，Mod 可以执行旧脚本；若在其 END 前用实体快捷键中断，旧协议不足以区分本块中新出现的临时和显式按住。此时使用新版客户端以 `CLEAR` 丢弃旧块，能保留此前已确认且尚未释放的显式状态。新版协议逐拍发送每个键的操作，能完整区分这两种情况。
 
+包含函数或 `RETURN` 的提交要求 Mod 声明 `input_functions` 与 `pause_queue` 能力。Rust 发送提交私有的函数表、调用点和返回指令，游戏端在输入边界执行调用栈，保留暂停现场。实机测试通过 `Hurt` 验证提前返回，通过跨维度重生验证旧调用现场的清理。脚本写法与执行上限见[函数、调用与返回](../input-script/functions.md)。
+
 ## 事件与显式截图
 
 事件脚本要求握手能力 `input_events`。Mod 用 `event_names` 列出支持的事件名；只声明旧能力的 Mod 可使用 Hurt 和 HpLost。MCP 校验处理块的键名，传入声明的源行、事件名和处理体。`InputQueue` 在客户端观察到事件时确定监听资格，在输入边界按注册顺序激活处理块。见[用户语法](../input-script/events.md)和[原版调用路径](../research/2026-11-22-hp-lost.md)。

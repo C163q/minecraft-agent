@@ -10,6 +10,8 @@
 
 在仓库根目录运行 `cargo test --offline` 验证语法、逐拍状态与示例。运行 `cargo clippy --offline --all-targets -- -D warnings` 检查代码。
 
+含函数或 `RETURN` 的脚本需要游戏端执行调用栈。对于来源可能包含函数的输入，使用 `Keyboard::try_play` 检查是否支持固定拍预览，或调用 `Script::compile` 生成正式派发程序。
+
 ## 核对游戏接口
 
 以目标实例的版本 JSON 确认 `mainClass`、Loader 和游戏要求的 Java 版本。26.3 的游戏 JAR 保留类与方法名称，可用 JDK 自带的 `javap` 核对签名和调用顺序。在 shell 中将 `MC_JAR` 设为目标客户端 JAR 的绝对路径后执行：

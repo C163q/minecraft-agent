@@ -214,6 +214,7 @@ public final class InputQueueTest {
         queue.advance();
         equal(reason, controls());
         equal(pending, queue.inspect().size());
+        equal(List.of(), queue.listeners());
         if (reason.equals("pause")) equal("Hurt", queue.pauseListeners().getFirst().event());
         if (pending > 0) {
             equal(null, controls());
@@ -286,8 +287,10 @@ public final class InputQueueTest {
         long first = queue.observe("Death");
         equal(null, controls());
         long owner = queue.submit(wire(program));
+        equal(false, queue.foregroundObserved(first));
         equal(null, controls());
         long second = queue.observe("Death");
+        equal(true, queue.foregroundObserved(second));
         equal(true, first != second);
         queue.retainObservation(second);
         equal(List.of(), queue.listeners());
@@ -296,7 +299,343 @@ public final class InputQueueTest {
         equal("80", queue.inspect().getFirst().remaining_ticks());
     }
 
+    private static String control(int line, String fields) {
+        return "{\"line\":" + line + ",\"held\":[],\"ticks\":\"0\"," + fields + "}";
+    }
+
+    private static String call(int line, String name) {
+        return control(line, "\"call\":\"" + name + "\"");
+    }
+
+    private static String returned(int line) { return control(line, "\"return\":true"); }
+
+    private static String listener(String event, String... body) {
+        return control(9, "\"event\":\"" + event + "\",\"body\":[" + String.join(",", body) + "]");
+    }
+
+    private static String definition(String name, String... body) {
+        return "\"" + name + "\":[" + String.join(",", body) + "]";
+    }
+
+    private long program(String definitions, String... main) {
+        return queue.submit(wire("{\"queue_version\":1,\"persistent\":[],\"functions\":{" + definitions
+            + "},\"runs\":[" + String.join(",", main) + "]}", "s"));
+    }
+
+    void callerContinuesAtReturn() {
+        program(definition("inner", PAUSE, returned(8), ACTION) + "," + definition("outer", call(7, "inner")),
+            call(2, "outer"), ACTION);
+        equal("pause", controls());
+        var pending = queue.inspect();
+        equal(List.of(8, 5, 5), pending.stream().map(InputQueue.Entry::line).toList());
+        tick("s");
+        equal("end", controls());
+    }
+
+    void observedOuterCancelsInnerBeforeDispatch() {
+        program(definition("outer", listener("Hurt", returned(7)), call(8, "inner"))
+            + "," + definition("inner", listener("Hurt", PAUSE, ACTION), ACTION), call(2, "outer"), ACTION);
+        equal(null, controls());
+        queue.observe("Hurt");
+        tick("s");
+        equal(List.of(), queue.listeners());
+        equal("end", controls());
+    }
+
+    void observedPausePrecedesNaturalReturn() {
+        String snap = control(13, "\"screenshot\":\"/tmp/function-handler.png\"");
+        program(definition("last", listener("Hurt", call(11, "helper")), ACTION) + ","
+            + definition("helper", snap, PAUSE, ACTION), call(2, "last"), PAUSE);
+        tick("s");
+        queue.observe("Hurt");
+        equal("pause", controls());
+        equal(1, queue.pauseListeners().size());
+        equal(1, queue.takeScreenshots().size());
+        equal(List.of(5, 5), queue.inspect().stream().map(InputQueue.Entry::line).toList());
+        equal("pause", controls()); // The caller resumes, cancelling the helper's pending input.
+        equal(List.of(), queue.inspect());
+    }
+
+    void detachedReturnStopsOnlyOriginalRequest() {
+        String definitions = definition("watch", listener("Death", call(12, "helper"), returned(13)), ACTION)
+            + "," + definition("helper", PAUSE, returned(16));
+        program(definitions, call(2, "watch"), ACTION);
+        equal(null, controls());
+        long death = queue.observe("Death");
+        queue.retainObservation(death);
+        equal("pause", controls());
+        equal("end", controls());
+        program(definitions, call(2, "watch"), ACTION);
+        equal(null, controls());
+        queue.retainObservation(queue.observe("Death"));
+        equal("pause", controls());
+        submit("Wait 2");
+        tick();
+        tick();
+        equal("end", controls());
+    }
+
+    void validatesUnusedFunctionsAtomically() {
+        submit("Wait 4");
+        var old = queue.inspect();
+        try {
+            program(definition("bad", listener("Hurt", call(27, "unknown"))), returned(3));
+            throw new AssertionError("undefined function in unused handler accepted");
+        } catch (IllegalArgumentException expected) {
+            equal(true, expected.getMessage().contains("27"));
+            equal(old, queue.inspect());
+        }
+    }
+
+    void laterHandlerReturnKeepsEarlierPauseAndScreenshot() {
+        String snap = control(8, "\"screenshot\":\"/tmp/first-handler.png\"");
+        program(definition("watch", listener("Hurt", snap, PAUSE, ACTION), listener("Hurt", returned(12)), ACTION),
+            call(2, "watch"), ACTION);
+        equal(null, controls());
+        queue.observe("Hurt");
+        equal("pause", controls());
+        equal(List.of("Hurt"), queue.pauseListeners().stream().map(InputQueue.Origin::event).toList());
+        equal(List.of(java.nio.file.Path.of("/tmp/first-handler.png")), queue.takeScreenshots());
+        equal(1, queue.inspect().size());
+        equal(null, queue.inspect().getFirst().call_stack());
+        tick("s");
+        equal("end", controls());
+    }
+
+    void laterHandlerClearCancelsEarlierPause() {
+        program("", listener("Hurt", PAUSE), listener("Hurt", control(8, "\"clear\":true"), ACTION), ACTION);
+        equal(null, controls());
+        queue.observe("Hurt");
+        tick("s");
+        equal(List.of(), queue.pauseListeners());
+        equal("end", controls());
+    }
+
+    void pauseKeepsExplicitReturn() {
+        program("", listener("Hurt", PAUSE, ACTION), ACTION, returned(10), ACTION);
+        tick("s");
+        queue.observe("Hurt");
+        equal("pause", controls());
+        equal(List.of(10, 5, 5), queue.inspect().stream().map(InputQueue.Entry::line).toList());
+        submit("Wait 2");
+        tick();
+        tick();
+        equal("end", controls());
+    }
+
+    void inspectDistinguishesCallsToSameFunction() {
+        program(definition("same", listener("Death", PAUSE), PAUSE, ACTION), call(7, "same"), call(8, "same"));
+        equal("pause", controls());
+        var first = queue.inspect().getFirst().call_stack().getFirst();
+        equal("same", first.name());
+        equal(7, first.line());
+        equal(List.of(first), queue.listeners().getFirst().call_stack());
+        equal(null, queue.inspect().getLast().call_stack());
+        tick("s");
+        equal("pause", controls());
+        var second = queue.inspect().getFirst().call_stack().getFirst();
+        equal(8, second.line());
+        equal(true, first.id() != second.id());
+        queue.observe("Death");
+        equal("pause", controls());
+        equal(List.of(second), queue.pauseListeners().getFirst().call_stack());
+    }
+
+    void malformedFunctionControls() {
+        for (String bad : List.of(
+                "{\"line\":19,\"held\":[],\"ticks\":\"1\",\"return\":false}",
+                control(19, "\"return\":\"true\""),
+                control(19, "\"call\":true"))) {
+            try {
+                program(definition("true"), bad);
+                throw new AssertionError("malformed function control accepted: " + bad);
+            } catch (IllegalArgumentException expected) {
+                equal(true, expected.getMessage().contains("19"));
+            }
+        }
+    }
+
+    void budgetSharedByHandlersAndResetAfterDeathTick() {
+        String calls = String.join(",", java.util.Collections.nCopies(4096, call(4, "empty")));
+        String onDeath = listener("Death", call(20, "empty"), PAUSE);
+        program(definition("empty"), onDeath, calls, ACTION);
+        equal(null, controls());
+        queue.observe("Death");
+        try {
+            controls();
+            throw new AssertionError("handler received an independent zero-tick budget");
+        } catch (InputQueue.FunctionLimit expected) {
+            equal(true, expected.getMessage().contains("line 20"));
+        }
+        program(definition("empty"), onDeath, calls, ACTION);
+        equal(null, controls());
+        equal(Set.of("s"), queue.input().held());
+        queue.retainObservation(queue.observe("Death"));
+        queue.advance(); // The dispatched tick finishes after the old world has been removed.
+        equal("pause", controls());
+    }
+
+    void handlerInheritsDepth() {
+        var defs = new java.util.ArrayList<String>();
+        for (int i = 1; i < 32; i++) defs.add(definition("f" + i, call(i, "f" + (i + 1))));
+        defs.add(definition("f32", listener("Hurt", call(44, "extra")), ACTION));
+        defs.add(definition("extra"));
+        program(String.join(",", defs), call(2, "f1"));
+        equal(null, controls());
+        queue.observe("Hurt");
+        try {
+            controls();
+            throw new AssertionError("handler discarded its owner's depth");
+        } catch (InputQueue.FunctionLimit expected) {
+            for (var part : List.of("$f1", "$f32", "$extra", "line 44")) equal(true, expected.getMessage().contains(part));
+        }
+        equal(List.of(), queue.inspect());
+        equal(List.of(), queue.listeners());
+    }
+
+    void olderHandlerClearStopsDiscardedForeground() {
+        program("", listener("HpLost", control(3, "\"clear\":true"), returned(4)), PAUSE, ACTION);
+        equal("pause", controls());
+        submit("Wait 20");
+        equal(null, controls());
+        queue.observe("HpLost");
+        equal("end", controls());
+        equal(List.of(), queue.inspect());
+        equal(null, controls());
+    }
+
+    void olderHandlerClearStopsDiscardedDetachedForeground() {
+        program("", PAUSE, listener("Death", control(7, "\"clear\":true"), returned(8)), ACTION);
+        equal("pause", controls());
+        program("", listener("Death", ACTION), ACTION);
+        equal(null, controls()); // The new request registers before the older request resumes.
+        queue.retainObservation(queue.observe("Death"));
+        equal("end", controls());
+        equal(List.of(), queue.inspect());
+    }
+
+    void olderClearFinishesAfterItsHandler(boolean explicit) {
+        String clear = control(7, "\"clear\":true");
+        String onHurt = explicit ? listener("Hurt", clear, ACTION, returned(10)) : listener("Hurt", clear, ACTION);
+        program("", onHurt, PAUSE, ACTION);
+        equal("pause", controls());
+        submit("Wait 20");
+        equal(null, controls());
+        queue.observe("Hurt");
+        tick("s");
+        equal("end", controls());
+        equal(List.of(), queue.inspect());
+    }
+
+    void anotherClearTakesOverCompletion() {
+        String clear = control(7, "\"clear\":true");
+        program("", listener("Hurt", clear, ACTION), listener("Hurt", clear, ACTION, returned(8)), PAUSE, ACTION);
+        equal("pause", controls());
+        submit("Wait 20");
+        equal(null, controls());
+        queue.observe("Hurt");
+        tick("s");
+        equal("end", controls());
+        equal(null, controls());
+    }
+
+    void returningSiblingCancelsCompletingHandler() {
+        program("", listener("Hurt", control(7, "\"clear\":true"), ACTION), listener("Hurt", returned(8)), PAUSE, ACTION);
+        equal("pause", controls());
+        submit("Wait 20");
+        equal(null, controls());
+        queue.observe("Hurt");
+        equal("end", controls());
+        equal(List.of(), queue.inspect());
+    }
+
+    void newerSubmissionReplacesCompletion() {
+        program("", listener("Hurt", control(7, "\"clear\":true"), PAUSE, returned(8)), PAUSE, ACTION);
+        equal("pause", controls());
+        submit("Wait 20");
+        equal(null, controls());
+        queue.observe("Hurt");
+        equal("pause", controls());
+        submit("Wait 2");
+        tick();
+        tick();
+        equal("end", controls());
+    }
+
+    void inspectExhaustedPausedCall() {
+        equal(null, queue.activeCalls());
+        long block = program(definition("f", PAUSE), call(2, "f"));
+        equal(null, queue.activeCalls());
+        equal("pause", controls());
+        equal(List.of(), queue.inspect());
+        var active = queue.activeCalls().getFirst();
+        equal(block, active.block());
+        equal("f", active.call_stack().getFirst().name());
+        equal(5, active.last_line());
+        equal("END", active.next());
+        equal(null, active.next_line());
+        equal("end", controls());
+        equal(null, queue.activeCalls());
+    }
+
+    void depthAndBudget() {
+        var defs = new java.util.ArrayList<String>();
+        for (int i = 1; i < 32; i++) defs.add(definition("f" + i, call(i, "f" + (i + 1))));
+        defs.add(definition("f32", PAUSE));
+        program(String.join(",", defs), call(1, "f1"));
+        equal("pause", controls());
+        equal("end", controls());
+
+        submit("Wait 3");
+        var old = queue.inspect();
+        long bad = program(definition("A", call(30, "B")) + "," + definition("B", call(31, "A")), call(3, "A"));
+        try {
+            controls();
+            throw new AssertionError("entered recursive level 33");
+        } catch (InputQueue.FunctionLimit expected) {
+            String message = expected.getMessage();
+            for (var part : List.of("block " + bad, "$A", "$B", "line 31", "32"))
+                equal(true, message.contains(part));
+            equal(old, queue.inspect());
+        }
+
+        String calls = String.join(",", java.util.Collections.nCopies(4096, call(4, "empty")));
+        program(definition("empty"), calls, ACTION, calls);
+        tick("s");
+        equal("end", controls());
+        program(definition("empty"), calls, PAUSE, call(19, "empty"));
+        equal("pause", controls());
+        try {
+            controls();
+            throw new AssertionError("pause reset function budget");
+        } catch (InputQueue.FunctionLimit expected) {
+            equal(true, expected.getMessage().contains("4096"));
+            equal(true, expected.getMessage().contains("line 19"));
+        }
+    }
+
     public static void main(String[] args) {
+        new InputQueueTest().olderClearFinishesAfterItsHandler(false);
+        new InputQueueTest().olderClearFinishesAfterItsHandler(true);
+        new InputQueueTest().anotherClearTakesOverCompletion();
+        new InputQueueTest().returningSiblingCancelsCompletingHandler();
+        new InputQueueTest().newerSubmissionReplacesCompletion();
+        new InputQueueTest().olderHandlerClearStopsDiscardedForeground();
+        new InputQueueTest().olderHandlerClearStopsDiscardedDetachedForeground();
+        new InputQueueTest().inspectExhaustedPausedCall();
+        new InputQueueTest().budgetSharedByHandlersAndResetAfterDeathTick();
+        new InputQueueTest().handlerInheritsDepth();
+        new InputQueueTest().laterHandlerClearCancelsEarlierPause();
+        new InputQueueTest().pauseKeepsExplicitReturn();
+        new InputQueueTest().inspectDistinguishesCallsToSameFunction();
+        new InputQueueTest().malformedFunctionControls();
+        new InputQueueTest().laterHandlerReturnKeepsEarlierPauseAndScreenshot();
+        new InputQueueTest().callerContinuesAtReturn();
+        new InputQueueTest().observedOuterCancelsInnerBeforeDispatch();
+        new InputQueueTest().observedPausePrecedesNaturalReturn();
+        new InputQueueTest().detachedReturnStopsOnlyOriginalRequest();
+        new InputQueueTest().validatesUnusedFunctionsAtomically();
+        new InputQueueTest().depthAndBudget();
         new InputQueueTest().onlyThisDeathsHandlersCrossDimensions();
         new InputQueueTest().lastExplicitPauseExpiresOwner();
         new InputQueueTest().onlyClearingListenersPreservesOldControls();
