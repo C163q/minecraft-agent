@@ -1,4 +1,5 @@
-use crate::parser::{FunctionControl, KeyAction, Keys, Row, Script};
+use crate::parser::{Flow, FunctionControl, KeyAction, Keys, Row, Script};
+use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
@@ -21,13 +22,13 @@ pub struct Keyboard {
     held: BTreeSet<String>,
 }
 
-/// The fixed-tick keyboard preview cannot evaluate functions or values.
+/// The fixed-tick keyboard preview cannot evaluate script control or values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreviewError;
 
 impl fmt::Display for PreviewError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a script with function control or values requires game playback")
+        f.write_str("a script with control flow, functions or values requires game playback")
     }
 }
 
@@ -40,7 +41,7 @@ impl Keyboard {
     ///
     /// # Panics
     ///
-    /// Panics when the script uses functions or values. Use
+    /// Panics when the script uses control flow, functions or values. Use
     /// [`Keyboard::try_play`] to handle unsupported scripts as an error.
     #[track_caller]
     pub fn play<'a>(&'a mut self, script: &'a Script) -> impl Iterator<Item = KeyFrame> + 'a {
@@ -53,7 +54,7 @@ impl Keyboard {
         &'a mut self,
         script: &'a Script,
     ) -> Result<impl Iterator<Item = KeyFrame> + 'a, PreviewError> {
-        if script.uses_functions() || script.uses_values() {
+        if script.uses_functions() || script.uses_values() || script.uses_control_flow() {
             return Err(PreviewError);
         }
         Ok(script
@@ -119,7 +120,47 @@ pub struct KeyRun {
     /// Absolute source file path when the script was loaded from disk.
     pub file: Option<String>,
     /// Value operation and its expression trees for game-side evaluation.
-    pub values: Option<serde_json::Value>,
+    pub values: Option<Value>,
+    pub flow: Option<FlowRun>,
+    /// Whether a value operation uses operators or built-ins added with control flow.
+    pub has_flow_expression: bool,
+}
+
+#[derive(Debug)]
+pub enum FlowRun {
+    If(Vec<BranchRun>),
+    While {
+        condition: Value,
+        body: Vec<KeyRun>,
+    },
+    For {
+        name: String,
+        expression: Value,
+        body: Vec<KeyRun>,
+    },
+    Break,
+    Continue,
+}
+
+#[derive(Debug)]
+pub struct BranchRun {
+    pub line: usize,
+    pub condition: Option<Value>,
+    pub body: Vec<KeyRun>,
+}
+
+impl FlowRun {
+    pub fn bodies(&self) -> impl DoubleEndedIterator<Item = &[KeyRun]> {
+        let (branches, body) = match self {
+            Self::If(branches) => (branches.as_slice(), None),
+            Self::While { body, .. } | Self::For { body, .. } => (&[][..], Some(body.as_slice())),
+            Self::Break | Self::Continue => (&[][..], None),
+        };
+        branches
+            .iter()
+            .map(|branch| branch.body.as_slice())
+            .chain(body)
+    }
 }
 
 pub struct DispatchProgram {
@@ -207,6 +248,16 @@ fn compile_block(
                 .and_modify(|line| *line = (*line).min(row.line))
                 .or_insert(row.line);
         }
+        if let Some(flow) = &row.flow {
+            runs.push(KeyRun {
+                line: row.line,
+                file: row.file.clone(),
+                source: row.input_source.clone(),
+                flow: Some(compile_flow(flow, keys)),
+                ..KeyRun::default()
+            });
+        }
+        let first_run = runs.len();
         if let Some((event, body)) = &row.handler {
             runs.push(KeyRun {
                 line: row.line,
@@ -294,8 +345,43 @@ fn compile_block(
                 ..KeyRun::default()
             });
         }
+        if row.has_flow_expression() {
+            for run in &mut runs[first_run..] {
+                run.has_flow_expression = true;
+            }
+        }
     }
     runs
+}
+
+fn compile_flow(flow: &Flow, keys: &mut BTreeMap<String, usize>) -> FlowRun {
+    let mut compile = |body: &[Row]| compile_block(body, &mut Keyboard::default(), keys);
+    match flow {
+        Flow::If(branches) => FlowRun::If(
+            branches
+                .iter()
+                .map(|branch| BranchRun {
+                    line: branch.line,
+                    condition: branch
+                        .condition
+                        .as_ref()
+                        .map(|condition| condition.json().clone()),
+                    body: compile(&branch.body),
+                })
+                .collect(),
+        ),
+        Flow::While(condition, body) => FlowRun::While {
+            condition: condition.json().clone(),
+            body: compile(body),
+        },
+        Flow::For(name, expression, body) => FlowRun::For {
+            name: name.clone(),
+            expression: expression.json().clone(),
+            body: compile(body),
+        },
+        Flow::Break => FlowRun::Break,
+        Flow::Continue => FlowRun::Continue,
+    }
 }
 
 #[cfg(test)]

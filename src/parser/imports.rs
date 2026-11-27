@@ -123,12 +123,7 @@ impl SourceFile {
                 .flat_map(|definition| &mut definition.body)
                 .chain(&mut file.entry)
             {
-                row.file = Some(file.name.clone());
-                if let Some((_, body)) = &mut row.handler {
-                    for row in body {
-                        row.file = Some(file.name.clone());
-                    }
-                }
+                row.set_file(&file.name);
             }
         }
         Ok(file)
@@ -136,14 +131,14 @@ impl SourceFile {
 
     fn parse_body(&mut self, text: &str, root: bool) -> Result<(), ParseError> {
         let eof = text.lines().count() + 1;
-        let mut source = logical_lines(text);
+        let mut source = logical_lines(text).peekable();
         while let Some((line, code)) = source.next() {
             let code = code.as_ref();
             if code.is_empty() {
                 continue;
             }
             if code == "BEGIN" {
-                self.entry = parse_block(&mut source, eof, true)?;
+                self.entry = parse_block(&mut source, eof, true, 0)?;
                 if let Some((line, _)) = source.find(|(_, code)| !code.is_empty()) {
                     return Err(parse_error(line, "unexpected input after END"));
                 }
@@ -172,7 +167,7 @@ impl SourceFile {
                 return Err(duplicate_error(line, name, &self.name, first.line));
             }
             expect_begin(&mut source, eof, "FUNCTION")?;
-            let body = parse_block(&mut source, eof, true)?;
+            let body = parse_block(&mut source, eof, true, 0)?;
             self.functions
                 .insert(name.to_owned(), Definition { line, params, body });
         }
@@ -317,10 +312,10 @@ fn assemble(files: Vec<SourceFile>) -> Result<Script, LoadError> {
                     .iter()
                     .map(|name| (name.as_str(), false))
                     .collect();
-                validate_block(&definition.body, params, &empty, &arities)
+                validate_block(&definition.body, params, &empty, &arities, false)
             })
             .chain(std::iter::once_with(|| {
-                validate_block(&file.entry, BTreeMap::new(), &empty, &arities)
+                validate_block(&file.entry, BTreeMap::new(), &empty, &arities, false)
             }))
             .filter_map(Result::err)
             .min_by_key(|error| error.line);
@@ -356,7 +351,7 @@ fn assemble(files: Vec<SourceFile>) -> Result<Script, LoadError> {
                 params.insert(name, definition.params);
             }
         }
-        if block_rows(&file.entry).any(Row::uses_values) {
+        if block_rows(&file.entry).any(|row| row.uses_values() || row.flow.is_some()) {
             checks.push(file.entry);
         }
     }

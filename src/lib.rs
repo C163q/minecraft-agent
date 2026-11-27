@@ -12,5 +12,5 @@
 mod keyboard;
 mod parser;
 
-pub use keyboard::{DispatchProgram, KeyFrame, KeyRun, Keyboard, PreviewError};
+pub use keyboard::{BranchRun, DispatchProgram, FlowRun, KeyFrame, KeyRun, Keyboard, PreviewError};
 pub use parser::{FunctionControl, ParseError, Script, ScriptSource};

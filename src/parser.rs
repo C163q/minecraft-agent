@@ -1,5 +1,5 @@
 use serde_json::{Value, json};
-use std::{borrow::Cow, collections::BTreeMap, error::Error, fmt, io, path::Path};
+use std::{borrow::Cow, collections::BTreeMap, error::Error, fmt, io, iter::Peekable, path::Path};
 
 mod expressions;
 mod imports;
@@ -180,25 +180,24 @@ fn record_action(
     Ok(())
 }
 
-fn top_level_arguments(code: &str) -> impl Iterator<Item = &str> {
+fn top_level_characters(code: &str) -> impl Iterator<Item = (usize, char)> {
     let mut depth = 0;
+    unquoted_characters(code).filter(move |&(_, ch)| {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ => (),
+        }
+        depth == 0
+    })
+}
+
+fn top_level_arguments(code: &str) -> impl Iterator<Item = &str> {
     let mut start = 0;
-    unquoted_characters(code)
+    top_level_characters(code)
         .chain(std::iter::once((code.len(), ',')))
-        .filter_map(move |(index, ch)| match ch {
-            '(' | '[' | '{' => {
-                depth += 1;
-                None
-            }
-            ')' | ']' | '}' => {
-                depth -= 1;
-                None
-            }
-            ',' if depth == 0 || index == code.len() => {
-                Some(&code[std::mem::replace(&mut start, index + 1)..index])
-            }
-            _ => None,
-        })
+        .filter(|&(_, ch)| ch == ',')
+        .map(move |(index, _)| &code[std::mem::replace(&mut start, index + 1)..index])
 }
 
 fn movement(name: &str, arguments: &str) -> Result<(InputAction, Option<Value>), String> {
@@ -346,6 +345,50 @@ impl ValueStatement {
             _ => None,
         }
     }
+
+    fn uses_control_flow(&self) -> bool {
+        let expressions = match self {
+            Self::Assign { target, value, .. } => {
+                if target.uses_control_flow() {
+                    return true;
+                }
+                value.expressions()
+            }
+            Self::Call(args) | Self::Print(_, args) => args,
+            Self::Return(expression) => std::slice::from_ref(expression),
+        };
+        expressions.iter().any(Expr::uses_control_flow)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct Branch {
+    pub line: usize,
+    pub condition: Option<Expr>,
+    pub body: Vec<Row>,
+}
+
+#[derive(Debug)]
+pub(crate) enum Flow {
+    If(Vec<Branch>),
+    While(Expr, Vec<Row>),
+    For(String, Expr, Vec<Row>),
+    Break,
+    Continue,
+}
+
+impl Flow {
+    fn bodies(&self) -> impl DoubleEndedIterator<Item = &[Row]> {
+        let (branches, body) = match self {
+            Self::If(branches) => (branches.as_slice(), None),
+            Self::While(_, body) | Self::For(_, _, body) => (&[][..], Some(body.as_slice())),
+            Self::Break | Self::Continue => (&[][..], None),
+        };
+        branches
+            .iter()
+            .map(|branch| branch.body.as_slice())
+            .chain(body)
+    }
 }
 
 #[derive(Default, Debug)]
@@ -364,6 +407,7 @@ pub(crate) struct Row {
     pub input_source: String,
     pub control: Option<FunctionControl>,
     pub file: Option<String>,
+    pub flow: Option<Flow>,
     statement: Option<ValueStatement>,
     wait_expression: Option<(String, Expr)>,
     input_actions: Vec<InputAction>,
@@ -383,6 +427,43 @@ impl Row {
             || self.wait_expression.is_some()
             || !self.input_actions.is_empty()
             || self.event_binding.is_some()
+    }
+
+    pub(crate) fn has_flow_expression(&self) -> bool {
+        self.statement
+            .as_ref()
+            .is_some_and(ValueStatement::uses_control_flow)
+            || self
+                .wait_expression
+                .as_ref()
+                .is_some_and(|(_, expression)| expression.uses_control_flow())
+            || self
+                .input_actions
+                .iter()
+                .flat_map(|action| &action.args)
+                .any(|(_, expression)| expression.uses_control_flow())
+    }
+
+    fn set_file(&mut self, file: &str) {
+        self.file = Some(file.into());
+        if let Some((_, body)) = &mut self.handler {
+            for row in body {
+                row.set_file(file);
+            }
+        }
+        match &mut self.flow {
+            Some(Flow::If(branches)) => {
+                for row in branches.iter_mut().flat_map(|branch| &mut branch.body) {
+                    row.set_file(file);
+                }
+            }
+            Some(Flow::While(_, body) | Flow::For(_, _, body)) => {
+                for row in body {
+                    row.set_file(file);
+                }
+            }
+            _ => (),
+        }
     }
 
     pub(crate) fn statement_wire(&self) -> Option<Value> {
@@ -409,7 +490,7 @@ impl Row {
     }
 
     fn parse_assignment(&mut self, declare: bool, code: &str) -> Result<(), String> {
-        let (index, _) = unquoted_characters(code)
+        let (index, _) = top_level_characters(code)
             .find(|&(_, ch)| ch == '=')
             .ok_or("expected '=' for assignment")?;
         let (target, body) = (&code[..index], &code[index + 1..]);
@@ -653,13 +734,28 @@ impl Script {
     pub(crate) fn uses_values(&self) -> bool {
         block_rows(&self.rows).any(Row::uses_values)
     }
+
+    pub(crate) fn uses_control_flow(&self) -> bool {
+        block_rows(&self.rows).any(|row| row.flow.is_some())
+    }
 }
 
-// Only entry and function bodies can declare listeners, so one pass through
-// those bodies and their immediate handlers visits the entire lexical block.
 fn block_rows(rows: &[Row]) -> impl Iterator<Item = &Row> {
-    rows.iter()
-        .flat_map(|row| std::iter::once(row).chain(row.handler.iter().flat_map(|(_, body)| body)))
+    let mut stack = vec![rows.iter()];
+    std::iter::from_fn(move || {
+        loop {
+            if let Some(row) = stack.last_mut()?.next() {
+                if let Some(flow) = &row.flow {
+                    stack.extend(flow.bodies().rev().map(<[Row]>::iter));
+                }
+                if let Some((_, body)) = &row.handler {
+                    stack.push(body.iter());
+                }
+                return Some(row);
+            }
+            stack.pop();
+        }
+    })
 }
 
 fn parse_error(line: usize, message: impl Into<String>) -> ParseError {
@@ -669,7 +765,9 @@ fn parse_error(line: usize, message: impl Into<String>) -> ParseError {
     }
 }
 
-fn logical_lines(text: &str) -> impl Iterator<Item = (usize, Cow<'_, str>)> {
+type LogicalLine<'a> = (usize, Cow<'a, str>);
+
+fn logical_lines(text: &str) -> impl Iterator<Item = LogicalLine<'_>> {
     let mut source = text.lines().enumerate();
     std::iter::from_fn(move || {
         let (index, code) = source.by_ref().find_map(|(index, raw)| {
@@ -702,7 +800,7 @@ fn composite_depth(code: &str) -> i32 {
 }
 
 fn expect_begin<'a>(
-    source: &mut impl Iterator<Item = (usize, Cow<'a, str>)>,
+    source: &mut impl Iterator<Item = LogicalLine<'a>>,
     eof: usize,
     declaration: &str,
 ) -> Result<(), ParseError> {
@@ -716,9 +814,10 @@ fn expect_begin<'a>(
 }
 
 fn parse_block<'a>(
-    source: &mut impl Iterator<Item = (usize, Cow<'a, str>)>,
+    source: &mut Peekable<impl Iterator<Item = LogicalLine<'a>>>,
     eof: usize,
     allow_listeners: bool,
+    depth: usize,
 ) -> Result<Vec<Row>, ParseError> {
     let mut rows = Vec::new();
     while let Some((line, code)) = source.next() {
@@ -729,6 +828,42 @@ fn parse_block<'a>(
         let error = |message| parse_error(line, message);
         if declaration(code, "IMPORT").is_some() {
             return Err(error(imports::IMPORT_POSITION.into()));
+        }
+        if let Some(condition) = control_head(code, "IF") {
+            let (branches, trailing_blanks) =
+                parse_if(source, eof, allow_listeners, depth, line, condition)?;
+            rows.push(flow_row(line, code, Flow::If(branches)));
+            rows.extend(trailing_blanks.into_iter().map(|line| Row {
+                line,
+                wait: 1,
+                ..Row::default()
+            }));
+            continue;
+        }
+        if let Some(keyword) = branch_keyword(code) {
+            return Err(error(format!("{keyword} must follow IF or ELIF")));
+        }
+        if let Some(condition) = control_head(code, "WHILE") {
+            let condition = parse_condition(condition, "WHILE", line)?;
+            let body = parse_nested(source, eof, allow_listeners, depth, "WHILE", line)?;
+            rows.push(flow_row(line, code, Flow::While(condition, body)));
+            continue;
+        }
+        if let Some(header) = declaration(code, "FOR") {
+            let (name, expression) = parse_for(header).map_err(error)?;
+            let body = parse_nested(source, eof, allow_listeners, depth, "FOR", line)?;
+            rows.push(flow_row(line, code, Flow::For(name, expression, body)));
+            continue;
+        }
+        if let Some((keyword, flow)) = [("BREAK", Flow::Break), ("CONTINUE", Flow::Continue)]
+            .into_iter()
+            .find(|(keyword, _)| control_head(code, keyword).is_some())
+        {
+            if code != keyword {
+                return Err(error(format!("{keyword} must be on its own line")));
+            }
+            rows.push(flow_row(line, code, flow));
+            continue;
         }
         if code.starts_with("ON(") {
             if !allow_listeners {
@@ -764,10 +899,10 @@ fn parse_block<'a>(
                     "invalid ON declaration {code:?}: expected one supported event on its own line"
                 )));
             }
-            expect_begin(source, eof, "ON")?;
+            let body = parse_nested(source, eof, false, depth, "ON", line)?;
             rows.push(Row {
                 line,
-                handler: Some((name.to_owned(), parse_block(source, eof, false)?)),
+                handler: Some((name.to_owned(), body)),
                 input_source: code.into(),
                 event_binding: binding,
                 ..Row::default()
@@ -779,11 +914,128 @@ fn parse_block<'a>(
     Err(parse_error(eof, "missing END"))
 }
 
+// An IF adds five levels to the wire tree. Leave space under Gson's 255-level
+// JSON limit for a maximally nested expression with object fields.
+const MAX_BLOCK_DEPTH: usize = 30;
+
+fn parse_nested<'a>(
+    source: &mut Peekable<impl Iterator<Item = LogicalLine<'a>>>,
+    eof: usize,
+    allow_listeners: bool,
+    depth: usize,
+    keyword: &str,
+    line: usize,
+) -> Result<Vec<Row>, ParseError> {
+    if depth >= MAX_BLOCK_DEPTH {
+        return Err(parse_error(
+            line,
+            format!("block nesting exceeds the limit of {MAX_BLOCK_DEPTH}"),
+        ));
+    }
+    expect_begin(source, eof, keyword)?;
+    parse_block(source, eof, allow_listeners, depth + 1)
+}
+
+fn parse_if<'a>(
+    source: &mut Peekable<impl Iterator<Item = LogicalLine<'a>>>,
+    eof: usize,
+    allow_listeners: bool,
+    depth: usize,
+    line: usize,
+    condition: &str,
+) -> Result<(Vec<Branch>, Vec<usize>), ParseError> {
+    let condition = parse_condition(condition, "IF", line)?;
+    let mut branches = vec![Branch {
+        line,
+        condition: Some(condition),
+        body: parse_nested(source, eof, allow_listeners, depth, "IF", line)?,
+    }];
+    loop {
+        let mut blanks = Vec::new();
+        while source.peek().is_some_and(|(_, code)| code.is_empty()) {
+            let (line, _) = source.next().unwrap();
+            blanks.push(line);
+        }
+        let Some(keyword) = source.peek().and_then(|(_, code)| branch_keyword(code)) else {
+            return Ok((branches, blanks));
+        };
+        let (line, header) = source.next().unwrap();
+        if branches
+            .last()
+            .is_some_and(|branch| branch.condition.is_none())
+        {
+            return Err(parse_error(line, format!("{keyword} cannot follow ELSE")));
+        }
+        let arguments = control_head(&header, keyword).unwrap();
+        let condition = if keyword == "ELSE" {
+            if !arguments.trim().is_empty() {
+                return Err(parse_error(line, "ELSE must be on its own line"));
+            }
+            None
+        } else {
+            Some(parse_condition(arguments, keyword, line)?)
+        };
+        let body = parse_nested(source, eof, allow_listeners, depth, keyword, line)?;
+        branches.push(Branch {
+            line,
+            condition,
+            body,
+        });
+    }
+}
+
+fn flow_row(line: usize, code: &str, flow: Flow) -> Row {
+    Row {
+        line,
+        input_source: code.into(),
+        flow: Some(flow),
+        ..Row::default()
+    }
+}
+
+fn control_head<'a>(code: &'a str, keyword: &str) -> Option<&'a str> {
+    declaration(code, keyword).or_else(|| {
+        code.strip_prefix(keyword)
+            .filter(|rest| rest.starts_with('('))
+    })
+}
+
+fn branch_keyword(code: &str) -> Option<&'static str> {
+    ["ELIF", "ELSE"]
+        .into_iter()
+        .find(|keyword| control_head(code, keyword).is_some())
+}
+
+fn parse_condition(source: &str, keyword: &str, line: usize) -> Result<Expr, ParseError> {
+    let expression = source
+        .trim()
+        .strip_prefix('(')
+        .and_then(|source| source.strip_suffix(')'))
+        .ok_or_else(|| parse_error(line, format!("{keyword} expects a parenthesized condition")))?;
+    expressions::parse(expression)
+        .map_err(|error| parse_error(line, format!("{keyword} condition: {error}")))
+}
+
+fn parse_for(header: &str) -> Result<(String, Expr), String> {
+    let (name, rest) = header
+        .trim()
+        .split_once(char::is_whitespace)
+        .ok_or("FOR expects a loop variable followed by IN and an expression")?;
+    let expression = declaration(rest.trim_start(), "IN")
+        .filter(|expression| !expression.trim().is_empty())
+        .ok_or("FOR expects a loop variable followed by IN and an expression")?;
+    let name = sigiled_name(name, "FOR variable")?.into();
+    let expression =
+        expressions::parse(expression).map_err(|error| format!("FOR expression: {error}"))?;
+    Ok((name, expression))
+}
+
 fn validate_block<'a>(
     rows: &'a [Row],
     mut locals: BTreeMap<&'a str, bool>,
     captured: &BTreeMap<&'a str, bool>,
     arities: &BTreeMap<&str, usize>,
+    in_loop: bool,
 ) -> Result<(), ParseError> {
     for row in rows {
         let error = |message: String| parse_error(row.line, message);
@@ -803,33 +1055,62 @@ fn validate_block<'a>(
             }
         }
         let binding = |name: &str| locals.get(name).or_else(|| captured.get(name)).copied();
-        let validate = |expr: &Expr| {
+        let validate = |expr: &Expr, line: usize| {
             for name in expr.references() {
                 if binding(name).is_none() {
-                    return Err(error(format!("undeclared variable ${name}")));
+                    return Err(parse_error(line, format!("undeclared variable ${name}")));
                 }
             }
             Ok(())
         };
-        if let Some((_, body)) = &row.handler {
-            let visible = captured
+        let visible = || {
+            captured
                 .iter()
                 .chain(&locals)
                 .map(|(&name, &read_only)| (name, read_only))
-                .collect();
+                .collect()
+        };
+        if let Some((_, body)) = &row.handler {
             let event_binding = row
                 .event_binding
                 .as_deref()
                 .map(|name| (name, true))
                 .into_iter()
                 .collect();
-            validate_block(body, event_binding, &visible, arities)?;
+            validate_block(body, event_binding, &visible(), arities, false)?;
+        }
+        match &row.flow {
+            Some(Flow::If(branches)) => {
+                let visible = visible();
+                for branch in branches {
+                    if let Some(condition) = &branch.condition {
+                        validate(condition, branch.line)?;
+                    }
+                    validate_block(&branch.body, BTreeMap::new(), &visible, arities, in_loop)?;
+                }
+            }
+            Some(Flow::While(condition, body)) => {
+                validate(condition, row.line)?;
+                validate_block(body, BTreeMap::new(), &visible(), arities, true)?;
+            }
+            Some(Flow::For(name, expression, body)) => {
+                validate(expression, row.line)?;
+                let binding = BTreeMap::from([(name.as_str(), false)]);
+                validate_block(body, binding, &visible(), arities, true)?;
+            }
+            Some(Flow::Break) if !in_loop => {
+                return Err(error("BREAK requires an enclosing loop".into()));
+            }
+            Some(Flow::Continue) if !in_loop => {
+                return Err(error("CONTINUE requires an enclosing loop".into()));
+            }
+            _ => (),
         }
         if let Some((_, expr)) = &row.wait_expression {
-            validate(expr)?;
+            validate(expr, row.line)?;
         }
         for (_, expr) in row.input_actions.iter().flat_map(|action| &action.args) {
-            validate(expr)?;
+            validate(expr, row.line)?;
         }
         match &row.statement {
             Some(ValueStatement::Assign {
@@ -843,13 +1124,13 @@ fn validate_block<'a>(
                         return Err(error(format!("duplicate variable declaration ${name}")));
                     }
                 } else {
-                    validate(target)?;
+                    validate(target, row.line)?;
                     if binding(name) == Some(true) {
                         return Err(error(format!("event variable ${name} is read-only")));
                     }
                 }
                 for expr in value.expressions() {
-                    validate(expr)?;
+                    validate(expr, row.line)?;
                 }
                 if *declare {
                     locals.insert(name, false);
@@ -857,10 +1138,10 @@ fn validate_block<'a>(
             }
             Some(ValueStatement::Call(args) | ValueStatement::Print(_, args)) => {
                 for expr in args {
-                    validate(expr)?;
+                    validate(expr, row.line)?;
                 }
             }
-            Some(ValueStatement::Return(expr)) => validate(expr)?,
+            Some(ValueStatement::Return(expr)) => validate(expr, row.line)?,
             None => (),
         }
     }

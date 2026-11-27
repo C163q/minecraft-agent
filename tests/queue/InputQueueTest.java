@@ -324,6 +324,305 @@ public final class InputQueueTest {
             + "},\"runs\":[" + String.join(",", main) + "]}", "s"));
     }
 
+    private static String branch(int line, String expression, String... body) {
+        return "{\"line\":" + line + (expression == null ? "" : ",\"expr\":" + expression)
+            + ",\"body\":[" + String.join(",", body) + "]}";
+    }
+
+    private static String choose(int line, String... branches) {
+        return control(line, "\"flow\":{\"op\":\"if\",\"branches\":[" + String.join(",", branches) + "]}");
+    }
+
+    private static String loop(int line, String operator, String expression, String... body) {
+        return control(line, "\"flow\":{\"op\":\"" + operator + "\""
+            + (operator.equals("for") ? ",\"name\":\"item\"" : "")
+            + ",\"expr\":" + expression + ",\"body\":[" + String.join(",", body) + "]}");
+    }
+
+    private static String jump(int line, String operator) {
+        return control(line, "\"flow\":{\"op\":\"" + operator + "\"}");
+    }
+
+    private static String value(int line, String action, String target, String expression) {
+        return control(line, "\"v\":{\"op\":\"" + action + "\",\"target\":" + target + ",\"expr\":" + expression + "}");
+    }
+
+    private static String print(int line, String expression) {
+        return control(line, "\"v\":{\"op\":\"print\",\"format\":\"{}\",\"args\":[" + expression + "]}");
+    }
+
+    private static String returnValue(int line, String expression) {
+        return control(line, "\"return\":true,\"v\":{\"expr\":" + expression + "}");
+    }
+
+    private String controls(List<String> output) {
+        return queue.controls(() -> moving, () -> moving = false, output::add);
+    }
+
+    void branchSelectionAndLoopSnapshotSurvivePause() {
+        String src = "[\"var\",\"source\"]", item = "[\"var\",\"item\"]";
+        String one = "[\"num\",\"1\"]", two = "[\"num\",\"2\"]";
+        String yes = "[\"lit\",true]", no = "[\"lit\",false]";
+        program("", value(2, "let", src, "[\"array\"," + one + "," + two + "]"),
+            loop(3, "for", src,
+                choose(4, branch(4, "[\"==\"," + item + "," + one + "]", PAUSE, print(6, item),
+                        value(7, "set", item, "[\"num\",\"99\"]"),
+                        value(8, "set", src, "[\"array\"]"), jump(9, "continue")),
+                    branch(11, no, print(12, "[\"index\"," + src + "," + one + "]")),
+                    branch(13, yes, print(14, item), ACTION),
+                    branch(16, null, PAUSE)),
+                jump(18, "break")),
+            returnValue(19, src));
+        equal(List.of(2, 3, 19), queue.inspect().stream().map(InputQueue.Entry::line).toList());
+        var output = new java.util.ArrayList<String>();
+        equal("pause", controls(output));
+        equal(List.of(6, 7, 8, 9, 18, 3, 19), queue.inspect().stream().map(InputQueue.Entry::line).toList());
+        equal(null, controls(output));
+        equal(List.of("1\n", "2\n"), output);
+        equal(Set.of("s"), queue.input().held());
+        queue.advance();
+        equal("end", controls(output));
+        equal(JsonParser.parseString("[]"), queue.takeReturnValue());
+    }
+
+    void lastTickListenerPauseDefersLoopExit() {
+        for (String terminal : List.of("", "break", "continue", "return")) {
+            String yes = "[\"lit\",true]";
+            var body = new java.util.ArrayList<>(List.of(listener("Hurt", PAUSE, ACTION), ACTION,
+                print(8, "[\"lit\",\"owner\"]")));
+            if (terminal.equals("return")) body.add(returnValue(9, "[\"lit\",\"returned\"]"));
+            else if (!terminal.isEmpty()) body.add(jump(9, terminal));
+            program("", loop(2, "for", "[\"array\"," + yes + "]",
+                choose(3, branch(3, yes, body.toArray(String[]::new)))), ACTION);
+            tick("s");
+            equal(true, queue.observe("Hurt") > 0);
+            var output = new java.util.ArrayList<String>();
+            equal("pause", controls(output));
+            equal(List.of("owner\n"), output);
+            equal(1, queue.listeners().size());
+            equal(1, queue.pauseListeners().size());
+            equal(true, queue.inspect().stream().anyMatch(row -> row.listener() != null));
+            equal(terminal.equals("return") ? "end" : null, controls(output));
+            equal(List.of("owner\n"), output);
+            equal(List.of(), queue.listeners());
+            equal(false, queue.inspect().stream().anyMatch(row -> row.listener() != null));
+            if (terminal.equals("return")) equal("returned", queue.takeReturnValue().getAsString());
+            else {
+                tick("s");
+                equal("end", controls());
+            }
+        }
+    }
+
+    void loopListenerReturnTargetsRegisteringCall() {
+        String yes = "[\"lit\",true]", hit = "[\"var\",\"hit\"]";
+        program(definition("helper", choose(31, branch(31, yes, returnValue(32, "[\"num\",\"7\"]"))), ACTION) + ","
+                + definition("inner", ACTION, PAUSE) + ","
+                + definition("watch", loop(10, "for", "[\"array\"," + yes + "]",
+                    listener("Hurt", choose(15, branch(15, yes, control(16,
+                        "\"call\":\"helper\",\"v\":{\"op\":\"let\",\"target\":" + hit + "}"), returnValue(17, hit)))),
+                    call(18, "inner")), PAUSE),
+            control(2, "\"call\":\"watch\",\"v\":{\"op\":\"let\",\"target\":" + hit + "}"),
+            returnValue(3, hit));
+        tick("s");
+        var active = queue.activeCalls().getFirst();
+        equal(List.of("watch", "inner"), active.call_stack().stream().map(InputQueue.Call::name).toList());
+        equal(true, queue.observe("Hurt") > 0);
+        equal("end", controls());
+        equal(7, queue.takeReturnValue().getAsInt());
+        equal(List.of(), queue.inspect());
+        equal(List.of(), queue.listeners());
+    }
+
+    void loopListenersExpireOnNextIterationAndClear() {
+        var outer = listener("HpLost", print(7, "[\"lit\",\"outer\"]"));
+        var inner = listener("Hurt", ACTION, PAUSE);
+        var item = "[\"var\",\"item\"]";
+        program("", outer, loop(2, "for", "[\"array\",[\"num\",\"1\"],[\"num\",\"2\"]]",
+            inner, print(3, item), ACTION, jump(4, "continue")), ACTION);
+        var output = new java.util.ArrayList<String>();
+        equal(null, controls(output));
+        equal(List.of("1\n"), output);
+        queue.input();
+        queue.advance();
+        queue.observe("Hurt");
+        queue.observe("HpLost");
+        equal("end", controls(output)); // Outer handler's own END stops playback.
+        equal(List.of("1\n", "outer\n", "2\n"), output);
+        equal(List.of("HpLost", "Hurt"), queue.listeners().stream().map(InputQueue.ListenerState::event).toList());
+        equal(List.of("ready", "ready"), queue.listeners().stream().map(InputQueue.ListenerState::state).toList());
+        equal(false, queue.inspect().stream().anyMatch(row -> row.listener() != null));
+        queue.observe("Hurt");
+        program("", control(2, "\"clear\":true"), ACTION);
+        tick("s");
+        equal("end", controls(output));
+        equal(List.of(), queue.inspect());
+        equal(List.of(), queue.listeners());
+    }
+
+    void returningSiblingCancelsCompletingHandlerFromBlockScope() {
+        String truth = "[\"lit\",true]";
+        program("", choose(2, branch(2, truth,
+            listener("Hurt", control(7, "\"clear\":true"), ACTION),
+            listener("Hurt", returned(8)), PAUSE, ACTION)));
+        equal("pause", controls());
+        submit("Wait 20");
+        equal(null, controls());
+        queue.observe("Hurt");
+        equal("end", controls());
+        equal(List.of(), queue.inspect());
+    }
+
+    void siblingReturnWaitsForPausedLocalHandler() {
+        var result = "[\"var\",\"result\"]";
+        var yes = "[\"lit\",true]";
+        program("", value(2, "let", result, "[\"lit\",\"initial\"]"),
+            loop(3, "for", "[\"array\"," + yes + "]",
+                listener("Hurt", PAUSE, value(9, "set", result, "[\"lit\",\"resumed\"]"), print(10, result)),
+                listener("Hurt", choose(13, branch(13, yes, returnValue(14, result)))),
+                ACTION, print(17, "[\"lit\",\"owner\"]")),
+            ACTION);
+        tick("s");
+        queue.observe("Hurt");
+        var output = new java.util.ArrayList<String>();
+        equal("pause", controls(output));
+        equal(List.of("owner\n"), output);
+        equal(null, queue.takeReturnValue());
+        equal(2, queue.listeners().size());
+        equal(List.of(9, 10, 14), queue.inspect().stream().filter(row -> row.listener() != null)
+            .map(InputQueue.Entry::line).toList());
+        equal("end", controls(output));
+        equal(List.of("owner\n", "resumed\n"), output);
+        equal("resumed", queue.takeReturnValue().getAsString());
+        equal(List.of(), queue.inspect());
+    }
+
+    void detachedReturnDoesNotUnwindPausedSibling() {
+        String yes = "[\"lit\",true]";
+        program("", loop(2, "for", "[\"array\"," + yes + "]", listener("Death", PAUSE, ACTION),
+            listener("Death", returnValue(10, "[\"lit\",\"detached\"]")), ACTION));
+        equal(null, controls());
+        queue.retainObservation(queue.observe("Death"));
+        equal("pause", controls());
+        equal("detached", queue.takeReturnValue().getAsString());
+        equal(List.of(5), queue.inspect().stream().map(InputQueue.Entry::line).toList());
+        tick("s");
+        equal("end", controls());
+    }
+
+    void observedMutationChangesTheNextWhileConditionButKeepsSelectedBranch() {
+        String condition = "[\"var\",\"keep\"]";
+        String yes = "[\"lit\",true]", no = "[\"lit\",false]";
+        program("", value(2, "let", condition, yes),
+            listener("Hurt", value(3, "set", condition, no)),
+            loop(4, "while", condition,
+                choose(5, branch(5, condition, PAUSE, print(10, "[\"lit\",\"selected\"]")),
+                    branch(12, null, PAUSE)),
+                ACTION),
+            returnValue(14, condition));
+        equal("pause", controls());
+        queue.observe("Hurt");
+        var output = new java.util.ArrayList<String>();
+        equal("end", controls(output));
+        equal(List.of("selected\n"), output);
+        tick("s");
+        equal("end", controls(output));
+        equal(List.of("selected\n"), output);
+        equal(false, queue.takeReturnValue().getAsBoolean());
+        equal(List.of(), queue.inspect());
+    }
+
+    void nestedLoopBodyDoesNotIncreaseFunctionDepth() {
+        String yes = "[\"lit\",true]";
+        var defs = new java.util.ArrayList<String>();
+        for (int i = 1; i <= 32; i++) {
+            String action = i == 32 ? PAUSE : call(i, "f" + (i + 1));
+            defs.add(definition("f" + i, choose(41, branch(41, yes,
+                loop(42, "for", "[\"array\"," + yes + "]", loop(43, "while", yes, action, jump(44, "break")),
+                    print(45, "[\"lit\",\"after break\"]"))))));
+        }
+        program(String.join(",", defs), call(2, "f1"));
+        equal("pause", controls());
+        var active = queue.activeCalls().getFirst();
+        equal(32, active.call_stack().size());
+        equal(44, active.next_line());
+        var output = new java.util.ArrayList<String>();
+        equal("end", controls(output));
+        equal(java.util.Collections.nCopies(32, "after break\n"), output);
+    }
+
+    void validatesEveryFlowBeforeAcceptanceAndReportsEvaluatedBranchLine() {
+        submit("Wait 4");
+        var before = queue.inspect();
+        var no = "[\"lit\",false]";
+        var yes = "[\"lit\",true]";
+        for (String body : List.of(
+                choose(2, branch(2, yes), branch(8, "[\"num\",\"1\"]")),
+                choose(2, branch(2, no, loop(8, "for", "[\"lit\",true]"))),
+                choose(2, branch(2, no, jump(8, "break"))),
+                loop(2, "while", no, listener("Hurt", choose(3, branch(3, yes, jump(8, "continue"))))),
+                listener("Hurt", choose(3, branch(3, yes, control(8, "\"event\":\"Death\",\"body\":[]")))))) {
+            try {
+                queue.submit(wire("{\"queue_version\":1,\"persistent\":[],\"runs\":[],\"checks\":[[" + body + "]]}"));
+                throw new AssertionError("accepted an invalid skipped branch " + body);
+            } catch (IllegalArgumentException expected) {
+                equal(true, expected.getMessage().contains("line 8"));
+                equal(before, queue.inspect());
+            }
+        }
+
+        String branch = control(4, "\"file\":\"lib.input\",\"flow\":{\"op\":\"if\",\"branches\":["
+            + branch(4, no) + "," + branch(8, "[\"var\",\"flag\"]") + "]}");
+        long bad = program(definition("flag", value(3, "let", "[\"var\",\"flag\"]", "[\"num\",\"0\"]"), branch),
+            print(2, "[\"lit\",\"before\"]"), call(12, "flag"));
+        var output = new java.util.ArrayList<String>();
+        try {
+            controls(output);
+            throw new AssertionError("accepted non-boolean ELIF");
+        } catch (InputQueue.ValueFailure expected) {
+            equal(bad, expected.block());
+            equal("lib.input", expected.file());
+            equal(8, expected.line());
+            equal(List.of("flag"), expected.call_stack().stream().map(InputQueue.Call::name).toList());
+            equal(List.of("before\n"), output);
+            equal(before, queue.inspect());
+        }
+    }
+
+    void iterationsShareTheSubmissionBudgetAcrossPausesAndHandlers() {
+        String calls = String.join(",", java.util.Collections.nCopies(4095, call(4, "empty")));
+        String no = "[\"lit\",false]", yes = "[\"lit\",true]";
+        String one = "[\"array\"," + yes + "]";
+        program(definition("empty"), calls, loop(8, "while", no, PAUSE),
+            loop(9, "for", "[\"array\"]", PAUSE), loop(10, "for", one, jump(11, "continue")), ACTION,
+            calls, loop(15, "for", one, jump(16, "break")));
+        tick("s");
+        equal("end", controls());
+
+        program(definition("empty"), listener("Hurt", loop(19, "while", yes, jump(20, "continue"))), calls,
+            loop(11, "for", one, PAUSE));
+        equal("pause", controls());
+        queue.observe("Hurt");
+        try {
+            controls();
+            throw new AssertionError("handler entered iteration 4097 after same-tick pause");
+        } catch (InputQueue.ValueFailure expected) {
+            equal(19, expected.line());
+            equal(true, expected.getMessage().contains("4096"));
+            equal(List.of(), queue.inspect());
+            equal(List.of(), queue.listeners());
+        }
+
+        program("", loop(21, "while", yes, jump(22, "continue")));
+        try {
+            controls();
+            throw new AssertionError("zero-tick WHILE continued past its entry limit");
+        } catch (InputQueue.ValueFailure expected) {
+            equal(21, expected.line());
+            equal(true, expected.getMessage().contains("4096"));
+        }
+    }
+
     void callerContinuesAtReturn() {
         program(definition("inner", PAUSE, returned(8), ACTION) + "," + definition("outer", call(7, "inner")),
             call(2, "outer"), ACTION);
@@ -1082,6 +1381,17 @@ public final class InputQueueTest {
     }
 
     public static void main(String[] args) {
+        new InputQueueTest().branchSelectionAndLoopSnapshotSurvivePause();
+        new InputQueueTest().lastTickListenerPauseDefersLoopExit();
+        new InputQueueTest().loopListenerReturnTargetsRegisteringCall();
+        new InputQueueTest().loopListenersExpireOnNextIterationAndClear();
+        new InputQueueTest().returningSiblingCancelsCompletingHandlerFromBlockScope();
+        new InputQueueTest().siblingReturnWaitsForPausedLocalHandler();
+        new InputQueueTest().detachedReturnDoesNotUnwindPausedSibling();
+        new InputQueueTest().observedMutationChangesTheNextWhileConditionButKeepsSelectedBranch();
+        new InputQueueTest().nestedLoopBodyDoesNotIncreaseFunctionDepth();
+        new InputQueueTest().validatesEveryFlowBeforeAcceptanceAndReportsEvaluatedBranchLine();
+        new InputQueueTest().iterationsShareTheSubmissionBudgetAcrossPausesAndHandlers();
         new InputQueueTest().pausedAssignmentKeepsTheOriginalIndexAndUpdatesTheCurrentArray();
         new InputQueueTest().validatesConstantFailuresInImportedEntriesBeforeAcceptance();
         new InputQueueTest().failedInputTickLeavesOtherInputsAndPersistentKeysUntouched();

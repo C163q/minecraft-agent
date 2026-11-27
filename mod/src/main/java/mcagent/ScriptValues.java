@@ -237,7 +237,14 @@ final class ScriptValues {
                     JsonElement operand = value(node.get(1), depth + 1);
                     yield operand == null ? null : unary(operator, number(operand));
                 }
-                case "+", "-", "*", "/", "Min", "Max" -> {
+                case "!", "Len" -> {
+                    arity(node, 1);
+                    JsonElement operand = value(node.get(1), depth + 1);
+                    if (operand == null) yield null;
+                    yield operator.equals("!") ? new JsonPrimitive(!bool(operand))
+                        : new JsonPrimitive(length(operand));
+                }
+                case "+", "-", "*", "/", "Min", "Max", "<", "<=", ">", ">=" -> {
                     arity(node, 2);
                     JsonElement left = value(node.get(1), depth + 1);
                     JsonElement right = value(node.get(2), depth + 1);
@@ -245,6 +252,13 @@ final class ScriptValues {
                     BigDecimal b = right == null ? null : number(right);
                     if (operator.equals("/") && b != null && b.signum() == 0) throw new Failure("division by zero");
                     yield a == null || b == null ? null : binary(operator, a, b);
+                }
+                case "==", "!=" -> {
+                    arity(node, 2);
+                    JsonElement left = value(node.get(1), depth + 1);
+                    JsonElement right = value(node.get(2), depth + 1);
+                    yield left == null || right == null ? null
+                        : new JsonPrimitive(equal(left, right) == operator.equals("=="));
                 }
                 default -> throw new Failure("unknown expression operator " + operator);
             };
@@ -298,6 +312,67 @@ final class ScriptValues {
         return name;
     }
 
+    static boolean bool(JsonElement value) {
+        if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isBoolean())
+            throw new Failure("expected a boolean");
+        return value.getAsBoolean();
+    }
+
+    private static int length(JsonElement value) {
+        if (value.isJsonArray()) return value.getAsJsonArray().size();
+        if (value.isJsonObject()) return value.getAsJsonObject().size();
+        throw new Failure("Len expects an array or object");
+    }
+
+    static List<JsonElement> iteration(JsonElement value) {
+        if (value.isJsonArray()) return List.copyOf(copy(value).getAsJsonArray().asList());
+        if (value.isJsonObject())
+            return value.getAsJsonObject().keySet().stream()
+                .sorted(ScriptValues::compareFieldNames)
+                .<JsonElement>map(JsonPrimitive::new).toList();
+        throw new Failure("FOR requires an array or object");
+    }
+
+    private static int compareFieldNames(String left, String right) {
+        int commonLimit = Math.min(left.length(), right.length());
+        for (int offset = 0; offset < commonLimit;) {
+            int a = left.codePointAt(offset);
+            int b = right.codePointAt(offset);
+            if (a != b) return Integer.compare(a, b);
+            offset += Character.charCount(a);
+        }
+        return Integer.compare(left.length(), right.length());
+    }
+
+    private static boolean equal(JsonElement left, JsonElement right) {
+        if (left.isJsonArray() && right.isJsonArray()) {
+            JsonArray a = left.getAsJsonArray();
+            JsonArray b = right.getAsJsonArray();
+            if (a.size() != b.size()) return false;
+            for (int i = 0; i < a.size(); ++i) {
+                if (!equal(a.get(i), b.get(i))) return false;
+            }
+            return true;
+        }
+        if (left.isJsonObject() && right.isJsonObject()) {
+            JsonObject a = left.getAsJsonObject();
+            JsonObject b = right.getAsJsonObject();
+            if (a.size() != b.size()) return false;
+            for (var entry : a.entrySet()) {
+                JsonElement value = b.get(entry.getKey());
+                if (value == null || !equal(entry.getValue(), value)) return false;
+            }
+            return true;
+        }
+        if (left.isJsonPrimitive() && right.isJsonPrimitive()) {
+            JsonPrimitive a = left.getAsJsonPrimitive();
+            JsonPrimitive b = right.getAsJsonPrimitive();
+            if (a.isNumber() && b.isNumber()) return number(a).compareTo(number(b)) == 0;
+            return a.equals(b);
+        }
+        return left.isJsonNull() && right.isJsonNull();
+    }
+
     private static BigDecimal number(JsonElement value) {
         if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber())
             throw new Failure("expected a number");
@@ -338,15 +413,19 @@ final class ScriptValues {
     }
 
     private static JsonPrimitive binary(String operator, BigDecimal left, BigDecimal right) {
-        return numeric(switch (operator) {
-            case "+" -> left.add(right);
-            case "-" -> left.subtract(right);
-            case "*" -> left.multiply(right);
-            case "/" -> divide(left, right);
-            case "Min" -> left.min(right);
-            case "Max" -> left.max(right);
+        return switch (operator) {
+            case "+" -> numeric(left.add(right));
+            case "-" -> numeric(left.subtract(right));
+            case "*" -> numeric(left.multiply(right));
+            case "/" -> numeric(divide(left, right));
+            case "Min" -> numeric(left.min(right));
+            case "Max" -> numeric(left.max(right));
+            case "<" -> new JsonPrimitive(left.compareTo(right) < 0);
+            case "<=" -> new JsonPrimitive(left.compareTo(right) <= 0);
+            case ">" -> new JsonPrimitive(left.compareTo(right) > 0);
+            case ">=" -> new JsonPrimitive(left.compareTo(right) >= 0);
             default -> throw new AssertionError(operator);
-        });
+        };
     }
 
     private static BigDecimal divide(BigDecimal left, BigDecimal right) {

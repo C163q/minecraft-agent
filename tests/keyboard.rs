@@ -395,3 +395,105 @@ END"#,
     )
     .unwrap();
 }
+
+#[test]
+fn control_flow_bindings_are_lexical_even_in_unselected_branches() {
+    let script = Script::parse(concat!(
+        "BEGIN\nLET $item = [1]\nFOR $item IN $item\nBEGIN\n",
+        "SET $item = $item + 1\nIF (false)\nBEGIN\n",
+        "LET $item = $item + 1\nCONTINUE\nEND\n",
+        "ELIF (true)\nBEGIN\nBREAK\nEND\nEND\n",
+        "Print(\"{}\", $item[0])\nEND"
+    ))
+    .unwrap();
+    assert!(Keyboard::default().try_play(&script).is_err());
+
+    for (source, line, detail) in [
+        (
+            "BEGIN\nIF (true)\nBEGIN\nLET $local = 1\nEND\nELIF ($local)\nBEGIN\nEND\nEND",
+            6,
+            "$local",
+        ),
+        (
+            "BEGIN\nIF (false)\nBEGIN\n$missing()\nEND\nEND",
+            4,
+            "$missing",
+        ),
+        (
+            "BEGIN\nFOR $item IN [1]\nBEGIN\nLET $item = 2\nEND\nEND",
+            4,
+            "duplicate variable",
+        ),
+        ("BEGIN\nFOR $item IN $item\nBEGIN\nEND\nEND", 2, "$item"),
+        (
+            "BEGIN\nFOR $item IN [1]\nBEGIN\nEND\nPrint(\"{}\", $item)\nEND",
+            5,
+            "$item",
+        ),
+    ] {
+        let error = Script::parse(source).unwrap_err();
+        assert_eq!(error.line, line, "{source}");
+        assert!(error.message.contains(detail), "{error}");
+    }
+}
+
+#[test]
+fn loop_jumps_and_listener_nesting_respect_execution_boundaries() {
+    Script::parse(concat!(
+        "BEGIN\nON(Hurt)\nBEGIN\nWHILE (true)\nBEGIN\n",
+        "IF (true)\nBEGIN\nBREAK\nEND\nCONTINUE\nEND\nEND\nEND"
+    ))
+    .unwrap();
+    for (source, line, detail) in [
+        ("BEGIN\nBREAK\nEND", 2, "BREAK"),
+        (
+            "BEGIN\nIF (false)\nBEGIN\nCONTINUE\nEND\nEND",
+            4,
+            "CONTINUE",
+        ),
+        (
+            "FUNCTION $f\nBEGIN\nBREAK\nEND\nBEGIN\nWHILE (true)\nBEGIN\n$f()\nEND\nEND",
+            3,
+            "BREAK",
+        ),
+        (
+            "BEGIN\nWHILE (true)\nBEGIN\nON(Hurt)\nBEGIN\nCONTINUE\nEND\nEND\nEND",
+            6,
+            "CONTINUE",
+        ),
+        (
+            "BEGIN\nON(Hurt)\nBEGIN\nFOR $i IN [0]\nBEGIN\nON(HpLost)\nBEGIN\nEND\nEND\nEND\nEND",
+            6,
+            "ON",
+        ),
+    ] {
+        let error = Script::parse(source).unwrap_err();
+        assert_eq!(error.line, line, "{source}");
+        assert!(error.message.contains(detail), "{error}");
+    }
+}
+
+#[test]
+fn malformed_branch_headers_report_their_own_line() {
+    for (body, line, keyword) in [
+        ("ELIF (true)\nBEGIN\nEND", 2, "ELIF"),
+        ("ELSE\nBEGIN\nEND", 2, "ELSE"),
+        (
+            "IF (true)\nBEGIN\nEND\nELSE\nBEGIN\nEND\nELSE\nBEGIN\nEND",
+            8,
+            "ELSE",
+        ),
+        (
+            "IF (true)\nBEGIN\nEND\nELSE\nBEGIN\nEND\nELIF (true)\nBEGIN\nEND",
+            8,
+            "ELIF",
+        ),
+        ("IF (true) Key(w)\nBEGIN\nEND", 2, "IF"),
+        ("WHILE true\nBEGIN\nEND", 2, "WHILE"),
+        ("FOR $i IN\nBEGIN\nEND", 2, "FOR"),
+    ] {
+        let error = Script::parse(&format!("BEGIN\n{body}\nEND")).unwrap_err();
+        assert_eq!(error.line, line, "{body}");
+        assert!(error.message.contains(keyword), "{error}");
+    }
+}

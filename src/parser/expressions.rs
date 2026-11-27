@@ -9,13 +9,13 @@ const MAX_NUMBER_BYTES: usize = 4096;
 /// Expressions are protocol arrays. Numeric tokens keep their source spelling
 /// so the Mod can evaluate them with decimal arithmetic.
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct Expr {
+pub(crate) struct Expr {
     wire: Value,
     depth: usize,
 }
 
 impl Expr {
-    pub(super) fn json(&self) -> &Value {
+    pub(crate) fn json(&self) -> &Value {
         &self.wire
     }
 
@@ -27,23 +27,35 @@ impl Expr {
     }
 
     pub(super) fn references(&self) -> impl Iterator<Item = &str> {
+        self.nodes()
+            .filter(|node| node[0] == "var")
+            .filter_map(|node| node[1].as_str())
+    }
+
+    pub(super) fn uses_control_flow(&self) -> bool {
+        self.nodes().any(|node| {
+            matches!(
+                node[0].as_str().unwrap(),
+                "!" | "<" | "<=" | ">" | ">=" | "==" | "!=" | "Len"
+            )
+        })
+    }
+
+    fn nodes(&self) -> impl Iterator<Item = &[Value]> {
         let mut stack = vec![&self.wire];
         std::iter::from_fn(move || {
-            while let Some(node) = stack.pop() {
-                let children = node.as_array().unwrap();
-                match children[0].as_str().unwrap() {
-                    "var" => return children[1].as_str(),
-                    "lit" | "num" => (),
-                    "field" => stack.push(&children[1]),
-                    "object" => {
-                        for field in children[1..].iter().rev() {
-                            stack.push(&field[1]);
-                        }
+            let node = stack.pop()?.as_array().unwrap();
+            match node[0].as_str().unwrap() {
+                "var" | "lit" | "num" => (),
+                "field" => stack.push(&node[1]),
+                "object" => {
+                    for field in node[1..].iter().rev() {
+                        stack.push(&field[1]);
                     }
-                    _ => stack.extend(children[1..].iter().rev()),
                 }
+                _ => stack.extend(node[1..].iter().rev()),
             }
-            None
+            Some(node.as_slice())
         })
     }
 
@@ -186,11 +198,17 @@ impl<'a> Parser<'a> {
     fn expression(&mut self, min_precedence: u8) -> Result<Expr, String> {
         let mut left = self.unary()?;
         loop {
-            let (op, precedence) = match self.rest.as_bytes().first() {
-                Some(b'+') => ("+", 1),
-                Some(b'-') => ("-", 1),
-                Some(b'*') => ("*", 2),
-                Some(b'/') => ("/", 2),
+            let (op, precedence) = match self.rest.as_bytes() {
+                [b'=', b'=', ..] => ("==", 1),
+                [b'!', b'=', ..] => ("!=", 1),
+                [b'<', b'=', ..] => ("<=", 2),
+                [b'>', b'=', ..] => (">=", 2),
+                [b'<', ..] => ("<", 2),
+                [b'>', ..] => (">", 2),
+                [b'+', ..] => ("+", 3),
+                [b'-', ..] => ("-", 3),
+                [b'*', ..] => ("*", 4),
+                [b'/', ..] => ("/", 4),
                 _ => break,
             };
             if precedence < min_precedence {
@@ -204,6 +222,10 @@ impl<'a> Parser<'a> {
     }
 
     fn unary(&mut self) -> Result<Expr, String> {
+        if self.take("!") {
+            let operand = self.nested(Self::unary)?;
+            return self.node("!", [operand], []);
+        }
         if self.take("-") {
             let operand = self.nested(Self::unary)?;
             return self.node("neg", [operand], []);
@@ -270,7 +292,7 @@ impl<'a> Parser<'a> {
             "null" => return self.node("lit", [], [Value::Null]),
             "true" => return self.node("lit", [], [true.into()]),
             "false" => return self.node("lit", [], [false.into()]),
-            "Floor" | "Ceil" | "Abs" => 1,
+            "Floor" | "Ceil" | "Abs" | "Len" => 1,
             "Min" | "Max" => 2,
             _ => return Err(format!("unknown value or math function {name:?}")),
         };
@@ -426,6 +448,48 @@ mod tests {
             ])
         );
         assert_eq!(expr.references().next(), None);
+        assert!(!expr.uses_control_flow());
+    }
+
+    #[test]
+    fn control_flow_expression_precedence() {
+        let expression = parse("!($n + 1 >= Len($target)) != $n < 2 < 3").unwrap();
+        assert_eq!(
+            expression.json(),
+            &json!([
+                "!=",
+                [
+                    "!",
+                    [
+                        ">=",
+                        ["+", ["var", "n"], ["num", "1"]],
+                        ["Len", ["var", "target"]]
+                    ]
+                ],
+                ["<", ["<", ["var", "n"], ["num", "2"]], ["num", "3"]]
+            ])
+        );
+        assert_eq!(
+            expression.references().collect::<Vec<_>>(),
+            ["n", "target", "n"]
+        );
+        assert!(expression.uses_control_flow());
+        assert!(
+            parse_target("$obj[{field: Len([])}.field]")
+                .unwrap()
+                .uses_control_flow()
+        );
+        assert!(
+            !parse(r#"{Len: 1}.Len + "==" "#)
+                .unwrap()
+                .uses_control_flow()
+        );
+        assert!(parse("Len()").is_err());
+        assert!(parse("Len([], {})").is_err());
+        assert!(parse("1 = 1").is_err());
+        assert!(parse("$n == null").is_ok());
+        assert!(parse("$n > 1").is_ok());
+        assert!(parse("$n <= 1").is_ok());
     }
 
     #[test]

@@ -45,6 +45,101 @@ public final class ScriptValuesTest {
         fails(() -> ScriptValues.constant(json("[\"index\",[\"var\",\"a\"],[\"lit\",false]]")), "index");
     }
 
+    private static void comparisons() {
+        var scope = new ScriptValues.Scope();
+        scope.declare("left", json("""
+            {"nested":[null,9007199254740992.0,true,"a"],"zero":-0.0}
+            """), false);
+        scope.declare("equal", json("""
+            {"zero":0,"nested":[null,9007199254740992,true,"a"]}
+            """), false);
+        scope.declare("different", json("""
+            {"nested":[null,9007199254740993,true,"a"],"zero":0}
+            """), false);
+        check(ScriptValues.evaluate(json("""
+            ["==",["var","left"],["var","equal"]]
+            """), scope).getAsBoolean());
+        check(ScriptValues.evaluate(json("""
+            ["!=",["var","left"],["var","different"]]
+            """), scope).getAsBoolean());
+        check(!ScriptValues.constant(json("""
+            ["==",["object",["a",["lit",null]]],["object",["b",["lit",null]]]]
+            """)).orElseThrow().getAsBoolean());
+        check(!ScriptValues.constant(json("""
+            ["==",["array",["lit",false]],["array",["num","0"]]]
+            """)).orElseThrow().getAsBoolean());
+        check(!ScriptValues.constant(json("""
+            ["==",["num","1"],["lit","1"]]
+            """)).orElseThrow().getAsBoolean());
+        check(!ScriptValues.constant(json("""
+            ["==",["lit","a"],["lit","A"]]
+            """)).orElseThrow().getAsBoolean());
+        check(ScriptValues.constant(json("""
+            ["<",["num","9007199254740992"],["num","9007199254740993"]]
+            """)).orElseThrow().getAsBoolean());
+        check(ScriptValues.constant(json("""
+            [">=",["num","1"],["num","1.0"]]
+            """)).orElseThrow().getAsBoolean());
+        fails(() -> ScriptValues.constant(json("""
+            ["<",["<",["num","1"],["num","2"]],["num","3"]]
+            """)), "number");
+        fails(() -> ScriptValues.constant(json("""
+            [">",["var","x"],["lit","3"]]
+            """)), "number");
+    }
+
+    private static void booleanNegationAndCollectionLength() {
+        check(ScriptValues.constant(json("""
+            ["!",["lit",false]]
+            """)).orElseThrow().getAsBoolean());
+        fails(() -> ScriptValues.constant(json("""
+            ["Len",["array",["var","a"],["!",["num","0"]]]]
+            """)), "boolean");
+        var scope = new ScriptValues.Scope();
+        scope.declare("a", json("\"false\""), false);
+        var dynamicNot = json("""
+            ["!",["var","a"]]
+            """);
+        check(ScriptValues.constant(dynamicNot).isEmpty());
+        fails(() -> ScriptValues.evaluate(dynamicNot, scope), "boolean");
+        check(ScriptValues.constant(json("""
+            ["Len",["array"]]
+            """)).orElseThrow().getAsInt() == 0);
+        check(ScriptValues.constant(json("""
+            ["Len",["object",["x",["lit",null]],["y",["lit",true]]]]
+            """)).orElseThrow().getAsInt() == 2);
+        fails(() -> ScriptValues.constant(json("""
+            ["Len",["lit","abc"]]
+            """)), "array or object");
+    }
+
+    private static void iterationUsesCollectionSnapshots() {
+        var array = json("""
+            [{"value":[1]}, null, 3]
+            """).getAsJsonArray();
+        var items = ScriptValues.iteration(array);
+        array.get(0).getAsJsonObject().getAsJsonArray("value").set(0, json("2"));
+        array.remove(1);
+        check(items.get(0).toString().equals("{\"value\":[1]}"));
+        check(items.get(1).isJsonNull());
+        check(items.get(2).getAsInt() == 3);
+
+        // UTF-16 ordering would put the surrogate pair before the BMP private-use key.
+        String supplementary = new String(Character.toChars(0x10000));
+        String privateUse = "\uE000";
+        var object = json("{}").getAsJsonObject();
+        object.addProperty(supplementary, 1);
+        object.addProperty(privateUse, 2);
+        object.addProperty("aa", 3);
+        object.addProperty("a", 4);
+        var fields = ScriptValues.iteration(object);
+        object.remove("a");
+        check(fields.stream().map(JsonElement::getAsString).toList().equals(
+            List.of("a", "aa", privateUse, supplementary)));
+        check(ScriptValues.iteration(json("[]")).isEmpty());
+        fails(() -> ScriptValues.iteration(json("null")), "array or object");
+    }
+
     private static void capturedScopesAndValueCopies() {
         var scope = new ScriptValues.Scope();
         scope.declare("original", json("{\"pos\":[1],\"block-id\":\"stone\"}"), false);
@@ -92,6 +187,9 @@ public final class ScriptValuesTest {
 
     public static void main(String[] args) {
         numbers();
+        comparisons();
+        booleanNegationAndCollectionLength();
+        iterationUsesCollectionSnapshots();
         capturedScopesAndValueCopies();
         frozenPathsAndAtomicWrites();
         printing();

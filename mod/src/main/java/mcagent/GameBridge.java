@@ -92,6 +92,7 @@ public final class GameBridge implements ClientModInitializer {
             hello.addProperty("input_events", true);
             hello.addProperty("input_functions", true);
             hello.addProperty("input_values", true);
+            hello.addProperty("input_control_flow", true);
             hello.add("event_names", JSON.toJsonTree(InputQueue.EVENT_NAMES));
             hello.add("persistent", JSON.toJsonTree(snapshot.persistent()));
             send(peer, JSON.toJson(hello));

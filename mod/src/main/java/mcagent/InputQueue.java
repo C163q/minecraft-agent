@@ -13,13 +13,14 @@ import java.util.function.ToIntFunction;
 
 /** A block advances one fixed tick at a time alongside every other retained block. */
 final class InputQueue {
+    private static final int MAX_ENTRIES_PER_TICK = 4096;
     static final List<String> EVENT_NAMES = List.of("Hurt", "HpLost", "Death", "CollideX", "CollideZ",
         "BlockBroken", "LeftGround", "ScreenOpened", "DamageBlocked", "BlockInteracted");
     record Call(long id, String name, int line, String file) {}
     record Origin(String event, long block, int line, List<Call> call_stack) {}
     record ListenerState(String event, long block, int line, String state, List<Call> call_stack) {}
     record ActiveCall(long block, List<Call> call_stack, Integer last_line, String next, Integer next_line) {}
-    record Entry(long block, int line, String source, String remaining_ticks, Origin listener, List<Call> call_stack) {}
+    record Entry(long block, int line, String file, String source, String remaining_ticks, Origin listener, List<Call> call_stack) {}
 
     static class ValueFailure extends RuntimeException {
         private final long block;
@@ -27,13 +28,13 @@ final class InputQueue {
         private final int line;
         private final List<Call> callStack;
 
-        private ValueFailure(long block, Run run, List<Call> callStack, String message) {
-            super("block " + block + ": " + run.location() + ": " + message
+        private ValueFailure(long block, String file, int line, List<Call> callStack, String message) {
+            super("block " + block + ": " + location(file, line) + ": " + message
                 + (callStack == null ? "" : "; call stack " + String.join(" -> ",
                     callStack.stream().map(c -> "$" + c.name + " at " + location(c.file, c.line)).toList())));
             this.block = block;
-            this.file = run.file;
-            this.line = run.line;
+            this.file = file;
+            this.line = line;
             this.callStack = callStack == null ? List.of() : callStack;
         }
 
@@ -45,7 +46,13 @@ final class InputQueue {
 
     static final class FunctionLimit extends ValueFailure {
         private FunctionLimit(long block, Run run, List<Call> stack, String limit) {
-            super(block, run, stack, limit + " entering $" + run.call);
+            super(block, run.file, run.line, stack, limit + " entering $" + run.call);
+        }
+    }
+
+    private static final class InvalidRun extends IllegalArgumentException {
+        InvalidRun(String file, int line, RuntimeException cause) {
+            super(location(file, line) + ": " + cause.getMessage(), cause);
         }
     }
 
@@ -69,14 +76,27 @@ final class InputQueue {
     }
     record Tick(Set<String> held, MouseDispatch.Actions mouse, int line, MouseDispatch.Prepared prepared) {}
 
+    private sealed interface Flow permits Choice, Loop, Jump {}
+    private record Branch(int line, JsonElement expr, List<Run> body) {}
+    private record Choice(List<Branch> branches) implements Flow {}
+    /** A null binding denotes a WHILE. */
+    private record Loop(JsonElement expr, String binding, List<Run> body) implements Flow {}
+    private enum Jump implements Flow { BREAK, CONTINUE }
+
     private record Run(int line, String file, String source, long ticks, Set<String> legacyHeld,
                        Map<String,String> keys, MouseDispatch.Actions mouse,
                        boolean waitMouse, boolean clear, boolean pause, String event, List<Run> body,
-                       boolean clearListeners, Path screenshot, String call, boolean returned, InputValues values) {
-        String location() { return InputQueue.location(file, line); }
+                       boolean clearListeners, Path screenshot, String call, boolean returned, InputValues values,
+                       Flow flow) {}
 
-        static Run read(JsonObject json, Set<String> knownKeys, boolean incremental, boolean inHandler,
-                        Map<String,List<String>> params) {
+    private record RunDecoder(Set<String> knownKeys, boolean incremental, Map<String,List<String>> params) {
+        List<Run> readAll(JsonArray rows, boolean inHandler, boolean inLoop) {
+            var runs = new ArrayList<Run>(rows.size());
+            for (var row : rows) runs.add(read(row.getAsJsonObject(), inHandler, inLoop));
+            return List.copyOf(runs);
+        }
+
+        private Run read(JsonObject json, boolean inHandler, boolean inLoop) {
             int line = json.get("line").getAsInt();
             if (line < 1) throw new IllegalArgumentException("invalid source line");
             String file = json.has("file") ? ScriptValues.string(json.get("file")) : null;
@@ -85,12 +105,11 @@ final class InputQueue {
                 boolean wait = flag(json, "wait_mouse"), clear = flag(json, "clear"), pause = flag(json, "pause");
                 int controls = (wait ? 1 : 0) + (clear ? 1 : 0) + (pause ? 1 : 0);
                 String event = json.has("event") ? json.get("event").getAsString() : null;
-                var body = new ArrayList<Run>();
+                List<Run> body = List.of();
                 if (event != null) {
                     if (inHandler || !EVENT_NAMES.contains(event))
                         throw new IllegalArgumentException("invalid listener declaration");
-                    for (var row : json.getAsJsonArray("body"))
-                        body.add(read(row.getAsJsonObject(), knownKeys, incremental, true, params));
+                    body = readAll(json.getAsJsonArray("body"), true, false);
                     controls++;
                 }
                 String call = null;
@@ -115,6 +134,13 @@ final class InputQueue {
                     throw new IllegalArgumentException("expected absolute screenshot path");
                 if (clearListeners) controls++;
                 if (screenshot != null) controls++;
+                Flow flow = null;
+                if (json.has("flow")) {
+                    if (!incremental) throw new IllegalArgumentException("flow requires queue_version 1");
+                    if (json.has("v")) throw new IllegalArgumentException("unexpected value operands on flow");
+                    flow = readFlow(json.getAsJsonObject("flow"), line, file, inHandler, inLoop);
+                    controls++;
+                }
                 var values = InputValues.read(json.getAsJsonObject("v"), event, call, returned);
                 if (call != null && values.args().size() != params.get(call).size())
                     throw new IllegalArgumentException("$" + call + " expects " + params.get(call).size() + " arguments");
@@ -147,10 +173,63 @@ final class InputQueue {
                 else if (!incremental) source = "legacy input, held " + held;
                 else source = "input at line " + line;
                 return new Run(line, file, source, ticks, incremental ? null : held, actions, mouse, wait, clear, pause,
-                    event, List.copyOf(body), clearListeners, screenshot, call, returned, values);
+                    event, body, clearListeners, screenshot, call, returned, values, flow);
+            } catch (InvalidRun error) {
+                throw error;
             } catch (RuntimeException error) {
-                throw new IllegalArgumentException(InputQueue.location(file, line) + ": " + error.getMessage(), error);
+                throw new InvalidRun(file, line, error);
             }
+        }
+
+        private Flow readFlow(JsonObject flow, int line, String file, boolean inHandler, boolean inLoop) {
+            String op = ScriptValues.string(flow.get("op"));
+            return switch (op) {
+                case "if" -> {
+                    requireFields(flow, Set.of("op", "branches"));
+                    var rows = flow.getAsJsonArray("branches");
+                    if (rows.isEmpty()) throw new IllegalArgumentException("missing IF branch");
+                    var branches = new ArrayList<Branch>();
+                    for (int i = 0; i < rows.size(); i++) {
+                        var row = rows.get(i).getAsJsonObject();
+                        int branchLine = row.get("line").getAsInt();
+                        if (branchLine < 1 || (i == 0 && branchLine != line))
+                            throw new IllegalArgumentException("invalid branch source line");
+                        try {
+                            var expr = row.get("expr");
+                            requireFields(row, expr == null ? Set.of("line", "body") : Set.of("line", "expr", "body"));
+                            if (expr != null) ScriptValues.constant(expr).ifPresent(ScriptValues::bool);
+                            else if (i == 0 || i != rows.size() - 1)
+                                throw new IllegalArgumentException("ELSE must follow the last condition");
+                            branches.add(new Branch(branchLine, expr, readAll(row.getAsJsonArray("body"), inHandler, inLoop)));
+                        } catch (InvalidRun error) {
+                            throw error;
+                        } catch (RuntimeException error) {
+                            throw new InvalidRun(file, branchLine, error);
+                        }
+                    }
+                    yield new Choice(List.copyOf(branches));
+                }
+                case "while", "for" -> {
+                    boolean forEach = op.equals("for");
+                    requireFields(flow, forEach ? Set.of("op", "name", "expr", "body") : Set.of("op", "expr", "body"));
+                    var expr = flow.get("expr");
+                    var constant = ScriptValues.constant(expr);
+                    if (forEach) constant.ifPresent(ScriptValues::iteration);
+                    else constant.ifPresent(ScriptValues::bool);
+                    var binding = forEach ? ScriptValues.name(flow.get("name")) : null;
+                    yield new Loop(expr, binding, readAll(flow.getAsJsonArray("body"), inHandler, true));
+                }
+                case "break", "continue" -> {
+                    requireFields(flow, Set.of("op"));
+                    if (!inLoop) throw new IllegalArgumentException(op + " requires an enclosing loop");
+                    yield op.equals("break") ? Jump.BREAK : Jump.CONTINUE;
+                }
+                default -> throw new IllegalArgumentException("unknown flow operation " + op);
+            };
+        }
+
+        private static void requireFields(JsonObject object, Set<String> fields) {
+            if (!object.keySet().equals(fields)) throw new IllegalArgumentException("invalid flow operands");
         }
 
         private static boolean flag(JsonObject obj, String name) {
@@ -172,19 +251,30 @@ final class InputQueue {
         return result;
     }
 
-    /** All branches of a submission use the same definitions and zero-tick budget. */
+    /** The entry and all of its event handlers share definitions and a zero-tick budget. */
     private static final class Submission {
         final Map<String,List<Run>> functions = new HashMap<>();
         final Map<String,List<String>> params = new HashMap<>();
         long id, budgetTick;
         int entries;
+
+        boolean chargeEntry(long tick) {
+            if (budgetTick != tick) {
+                budgetTick = tick;
+                entries = 0;
+            }
+            return ++entries <= MAX_ENTRIES_PER_TICK;
+        }
     }
 
     private record ReturnAssignment(Frame caller, Run run, Consumer<JsonElement> write) {}
 
+    private enum FrameKind { ROOT, FUNCTION, BRANCH, ITERATION }
+
     private static final class Frame {
         final Block block;
-        final Frame parent; // Calling frame, or the listener's registration frame.
+        final Frame parent; // Enclosing scope, caller, or listener registration frame.
+        final FrameKind kind;
         final List<Call> stack;
         final List<Run> code;
         final ScriptValues.Scope scope;
@@ -194,11 +284,13 @@ final class InputQueue {
         long remaining;
         boolean registeredListener;
         boolean waitStarted;
+        Iterator<JsonElement> items; // Present while this frame is suspended at a FOR head.
 
-        Frame(Block block, Frame parent, List<Call> stack, List<Run> code, ScriptValues.Scope scope,
+        Frame(Block block, Frame parent, FrameKind kind, List<Call> stack, List<Run> code, ScriptValues.Scope scope,
               ReturnAssignment destination) {
             this.block = block;
             this.parent = parent;
+            this.kind = kind;
             this.stack = stack;
             this.code = code;
             this.scope = scope;
@@ -211,6 +303,7 @@ final class InputQueue {
         void next() {
             lastLine = head().line;
             pc++;
+            items = null;
             loadRemaining();
         }
 
@@ -223,6 +316,24 @@ final class InputQueue {
             for (Frame f = this; f != null; f = f.parent)
                 if (f == ancestor) return true;
             return false;
+        }
+
+        boolean local() { return kind == FrameKind.BRANCH || kind == FrameKind.ITERATION; }
+
+        Frame activation() {
+            Frame frame = this;
+            while (frame.local()) frame = frame.parent;
+            return frame;
+        }
+
+        Frame iteration() {
+            Frame frame = this;
+            while (frame.kind != FrameKind.ITERATION) frame = frame.parent;
+            return frame;
+        }
+
+        int previewStart() {
+            return items != null && !items.hasNext() ? pc + 1 : pc;
         }
     }
 
@@ -241,7 +352,7 @@ final class InputQueue {
             this.legacyFinal = legacyFinal;
             this.listener = listener;
             var owner = listener == null ? null : listener.owner;
-            frames.push(new Frame(this, owner, owner == null ? null : owner.stack, body, scope, null));
+            frames.push(new Frame(this, owner, FrameKind.ROOT, owner == null ? null : owner.stack, body, scope, null));
             onlyClearsListeners = !body.isEmpty() && body.stream().allMatch(Run::clearListeners);
         }
 
@@ -273,21 +384,15 @@ final class InputQueue {
                 }
                 submission.params.put(name, List.copyOf(parameters));
             }
+            var decoder = new RunDecoder(knownKeys, incremental, submission.params);
             for (var entry : definitions.entrySet()) {
-                var code = readRuns(entry.getValue().getAsJsonArray(), knownKeys, incremental, submission.params);
+                var code = decoder.readAll(entry.getValue().getAsJsonArray(), false, false);
                 submission.functions.put(entry.getKey(), code);
             }
             if (json.has("checks")) for (var rows : json.getAsJsonArray("checks"))
-                readRuns(rows.getAsJsonArray(), knownKeys, incremental, submission.params);
-            var body = readRuns(json.getAsJsonArray("runs"), knownKeys, incremental, submission.params);
+                decoder.readAll(rows.getAsJsonArray(), false, false);
+            var body = decoder.readAll(json.getAsJsonArray("runs"), false, false);
             return new Block(submission, incremental ? null : finalKeys, null, body, new ScriptValues.Scope());
-        }
-
-        private static List<Run> readRuns(JsonArray rows, Set<String> knownKeys, boolean incremental,
-                                          Map<String,List<String>> params) {
-            var runs = new ArrayList<Run>(rows.size());
-            for (var row : rows) runs.add(Run.read(row.getAsJsonObject(), knownKeys, incremental, false, params));
-            return List.copyOf(runs);
         }
     }
 
@@ -463,13 +568,22 @@ final class InputQueue {
 
     private static final class Boundary {
         final Set<Block> paused = new HashSet<>();
-        final Set<Frame> deferReturn = new HashSet<>();
+        final Set<Frame> deferExit = new HashSet<>();
         boolean end, revisit;
 
         void pause(Block block) {
             paused.add(block);
             if (block.listener != null)
-                for (Frame f = block.listener.owner; f != null; f = f.parent) deferReturn.add(f);
+                for (Frame f = block.listener.owner; f != null; f = f.parent) deferExit.add(f);
+        }
+
+        boolean defersHandlerReturn(Frame target) {
+            for (var block : paused) {
+                if (block.listener == null) continue;
+                var registration = block.listener.owner;
+                if (registration.local() && registration.descendsFrom(target)) return true;
+            }
+            return false;
         }
     }
 
@@ -478,24 +592,46 @@ final class InputQueue {
         while (true) {
             var frame = block.current();
             var run = frame.head();
-            // The natural END of the entry keeps observed handlers, so it cannot cancel a PAUSE.
-            boolean returnsFromOwner = run == null ? frame.parent != null : run.returned;
-            if (returnsFromOwner && boundary.deferReturn.contains(frame)) return;
             if (run == null) {
+                // The natural END of the entry keeps observed handlers, so it cannot cancel a PAUSE.
+                if (frame.parent != null && boundary.deferExit.contains(frame)) return;
                 if (!leave(block, frame, false, null, boundary)) return;
                 continue;
             }
             if (run.ticks != 0 || (run.waitMouse && moving.getAsBoolean())) return;
-            frame.next();
+            Frame exit = null;
+            if (run.returned) {
+                exit = frame.activation();
+                if (exit.kind == FrameKind.ROOT && block.listener != null && !block.detached) {
+                    var owner = block.listener.owner.activation();
+                    if ((owner.parent == null || blocks.contains(owner.block)) && boundary.defersHandlerReturn(owner))
+                        return;
+                }
+            } else if (run.flow instanceof Jump) exit = frame.iteration();
+            if (exit != null && boundary.deferExit.contains(exit)) return;
             try {
-                if (run.call != null) enter(block, frame, run);
+                if (run.flow instanceof Loop loop) {
+                    iterate(frame, run, loop);
+                    continue;
+                }
+                frame.next();
+                if (run.flow instanceof Choice choice) choose(frame, run, choice);
+                else if (run.flow instanceof Jump jump) {
+                    unwindTo(block, exit);
+                    popFrame(block);
+                    if (jump == Jump.BREAK) {
+                        exit.parent.next();
+                        exit.parent.lastLine = run.line;
+                    }
+                } else if (run.call != null) enter(block, frame, run);
                 else if (run.returned) {
                     var value = run.values.expr() == null ? null : ScriptValues.evaluate(run.values.expr(), frame.scope);
-                    if (block.listener != null && block.frames.size() == 1) {
+                    unwindTo(block, exit);
+                    if (block.listener != null && exit.kind == FrameKind.ROOT) {
                         returnFromHandler(block, value, boundary);
                         return;
                     }
-                    if (!leave(block, frame, true, value, boundary)) return;
+                    if (!leave(block, exit, true, value, boundary)) return;
                 } else if (run.values.assignment()) {
                     var destination = assignment(frame, run);
                     destination.write.accept(ScriptValues.evaluate(run.values.expr(), frame.scope));
@@ -519,6 +655,47 @@ final class InputQueue {
                 throw fail(frame, run, error);
             }
         }
+    }
+
+    private void choose(Frame frame, Run run, Choice choice) {
+        for (var branch : choice.branches) {
+            frame.lastLine = branch.line;
+            try {
+                if (branch.expr != null && !ScriptValues.bool(ScriptValues.evaluate(branch.expr, frame.scope))) continue;
+            } catch (IllegalArgumentException error) {
+                throw fail(frame, run.file, branch.line, error);
+            }
+            var block = frame.block;
+            block.frames.push(new Frame(block, frame, FrameKind.BRANCH, frame.stack, branch.body,
+                frame.scope.child(), null));
+            return;
+        }
+    }
+
+    private void iterate(Frame frame, Run run, Loop loop) {
+        boolean forEach = loop.binding != null;
+        boolean hasIteration;
+        if (forEach) {
+            if (frame.items == null)
+                frame.items = ScriptValues.iteration(ScriptValues.evaluate(loop.expr, frame.scope)).iterator();
+            hasIteration = frame.items.hasNext();
+        } else {
+            hasIteration = ScriptValues.bool(ScriptValues.evaluate(loop.expr, frame.scope));
+        }
+        if (!hasIteration) {
+            frame.next();
+            return;
+        }
+        var block = frame.block;
+        if (!block.submission.chargeEntry(tick)) {
+            abort(block.submission);
+            throw new ValueFailure(block.submission.id, run.file, run.line, frame.stack,
+                "zero-tick entry limit " + MAX_ENTRIES_PER_TICK + " entering " + (forEach ? "FOR" : "WHILE") + " iteration");
+        }
+        frame.lastLine = run.line;
+        var scope = frame.scope.child();
+        if (forEach) scope.declare(loop.binding, frame.items.next(), false);
+        block.frames.push(new Frame(block, frame, FrameKind.ITERATION, frame.stack, loop.body, scope, null));
     }
 
     private static ReturnAssignment assignment(Frame frame, Run run) {
@@ -552,13 +729,9 @@ final class InputQueue {
         var stack = parent.stack == null ? new ArrayList<Call>() : new ArrayList<>(parent.stack);
         var call = new Call(++lastCall, run.call, run.line, run.file);
         stack.add(call);
-        if (block.submission.budgetTick != tick) {
-            block.submission.budgetTick = tick;
-            block.submission.entries = 0;
-        }
         String limit = null;
         if (stack.size() > 32) limit = "function depth limit 32";
-        else if (++block.submission.entries > 4096) limit = "function entry limit 4096";
+        else if (!block.submission.chargeEntry(tick)) limit = "zero-tick entry limit " + MAX_ENTRIES_PER_TICK;
         if (limit != null) {
             abort(block.submission);
             throw new FunctionLimit(block.submission.id, run, List.copyOf(stack), limit);
@@ -568,13 +741,13 @@ final class InputQueue {
         var arguments = run.values.evaluateArgs(parent.scope);
         var params = block.submission.params.get(run.call);
         for (int i = 0; i < arguments.size(); ++i) scope.declare(params.get(i), arguments.get(i), false);
-        block.frames.push(new Frame(block, parent, List.copyOf(stack), block.submission.functions.get(run.call),
-            scope, destination));
+        block.frames.push(new Frame(block, parent, FrameKind.FUNCTION, List.copyOf(stack),
+            block.submission.functions.get(run.call), scope, destination));
     }
 
     /** RETURN in a handler targets its registration, even when the owner is currently in a child call. */
     private void returnFromHandler(Block block, JsonElement value, Boundary boundary) {
-        Frame owner = block.listener.owner;
+        Frame owner = block.listener.owner.activation();
         if (block.detached || !blocks.contains(owner.block)) {
             if (!block.detached && owner.parent == null) cancelChildren(owner);
             removeBlock(block);
@@ -585,21 +758,15 @@ final class InputQueue {
             }
             return;
         }
-        while (owner.block.current() != owner) {
-            var child = owner.block.frames.pop();
-            expireListeners(child);
-        }
+        unwindTo(owner.block, owner);
         leave(owner.block, owner, true, value, boundary);
         boundary.revisit = true;
     }
 
     /** True when this branch continues in its caller at the same boundary. */
     private boolean leave(Block block, Frame frame, boolean explicit, JsonElement value, Boundary boundary) {
-        boolean root = block.frames.size() == 1;
-        if (explicit || !root) cancelChildren(frame);
-        expireListeners(frame);
-        if (!root) {
-            block.frames.pop();
+        if (frame.kind != FrameKind.ROOT) {
+            popFrame(block);
             if (frame.destination != null) {
                 var destination = frame.destination;
                 try {
@@ -610,6 +777,8 @@ final class InputQueue {
             }
             return true;
         }
+        if (explicit && frame.registeredListener) cancelChildren(frame);
+        expireListeners(frame);
         removeBlock(block);
         if (block.legacyFinal != null) {
             persistent.clear();
@@ -624,8 +793,18 @@ final class InputQueue {
         return false;
     }
 
+    private void unwindTo(Block block, Frame target) {
+        while (block.current() != target) popFrame(block);
+    }
+
+    private void popFrame(Block block) {
+        var frame = block.frames.pop();
+        if (frame.registeredListener) cancelChildren(frame);
+        expireListeners(frame);
+        if (frame.local() && frame.lastLine != null) frame.parent.lastLine = frame.lastLine;
+    }
+
     private void cancelChildren(Frame owner) {
-        if (!owner.registeredListener) return;
         for (var other : List.copyOf(blocks))
             if (other.listener != null && other.listener.owner.descendsFrom(owner)) removeBlock(other);
         pending.removeIf(other -> other.listener.owner.descendsFrom(owner));
@@ -642,8 +821,12 @@ final class InputQueue {
     }
 
     private ValueFailure fail(Frame frame, Run run, RuntimeException error) {
+        return fail(frame, run.file, run.line, error);
+    }
+
+    private ValueFailure fail(Frame frame, String file, int line, RuntimeException error) {
         abort(frame.block.submission);
-        var failure = new ValueFailure(frame.block.submission.id, run, frame.stack, error.getMessage());
+        var failure = new ValueFailure(frame.block.submission.id, file, line, frame.stack, error.getMessage());
         failure.initCause(error);
         return failure;
     }
@@ -756,8 +939,19 @@ final class InputQueue {
     private static void inspectCall(Block block, List<ActiveCall> calls) {
         var frame = block.current();
         if (frame.stack == null) return;
-        var next = frame.head();
-        calls.add(new ActiveCall(block.id, frame.stack, frame.lastLine, next == null ? "END" : next.source,
+        Integer lastLine = frame.lastLine;
+        for (Frame scope = frame; lastLine == null && scope.local(); scope = scope.parent)
+            lastLine = scope.parent.lastLine;
+        Run next = null;
+        for (Frame scope = frame; ; scope = scope.parent) {
+            int start = scope.previewStart();
+            if (start < scope.code.size()) {
+                next = scope.code.get(start);
+                break;
+            }
+            if (!scope.local()) break;
+        }
+        calls.add(new ActiveCall(block.id, frame.stack, lastLine, next == null ? "END" : next.source,
             next == null ? null : next.line));
     }
 
@@ -771,11 +965,11 @@ final class InputQueue {
 
     private static void inspectBlock(Block block, List<Entry> rows) {
         for (var frame : block.frames) {
-            for (int i = frame.pc; i < frame.code.size(); i++) {
+            for (int i = frame.previewStart(); i < frame.code.size(); i++) {
                 var run = frame.code.get(i);
                 String remaining = run.ticks == 0 || (run.values.delay() && (i != frame.pc || !frame.waitStarted))
                     ? null : Long.toUnsignedString(i == frame.pc ? frame.remaining : run.ticks);
-                rows.add(new Entry(block.id, run.line, run.source, remaining,
+                rows.add(new Entry(block.id, run.line, run.file, run.source, remaining,
                     block.listener == null ? null : block.listener.origin, frame.stack));
             }
         }

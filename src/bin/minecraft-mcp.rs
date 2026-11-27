@@ -6,7 +6,7 @@ mod hints;
 #[path = "minecraft-mcp/queue.rs"]
 mod queue;
 
-use minecraft_input::{DispatchProgram, FunctionControl, KeyRun, Script, ScriptSource};
+use minecraft_input::{DispatchProgram, FlowRun, FunctionControl, KeyRun, Script, ScriptSource};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -63,19 +63,48 @@ fn max_mouse_speed() -> Result<f64> {
     Ok(speed)
 }
 
-// A listener body cannot declare another listener directly. Called functions
-// are visited from the function table without following the call graph.
 fn program_runs(program: &DispatchProgram) -> impl Iterator<Item = &KeyRun> + Clone {
-    program
-        .runs
+    let mut stack: Vec<_> = program
+        .checks
         .iter()
-        .chain(program.functions.values().flatten())
-        .chain(program.checks.iter().flatten())
-        .flat_map(|run| std::iter::once(run).chain(run.handler.iter().flat_map(|(_, body)| body)))
+        .rev()
+        .chain(program.functions.values().rev())
+        .chain(std::iter::once(&program.runs))
+        .map(|body| body.iter())
+        .collect();
+    std::iter::from_fn(move || {
+        loop {
+            if let Some(run) = stack.last_mut()?.next() {
+                if let Some(flow) = &run.flow {
+                    stack.extend(flow.bodies().rev().map(<[KeyRun]>::iter));
+                }
+                if let Some((_, body)) = &run.handler {
+                    stack.push(body.iter());
+                }
+                return Some(run);
+            }
+            stack.pop();
+        }
+    })
+}
+
+fn run_location(run: &KeyRun) -> String {
+    run.file.as_ref().map_or_else(
+        || format!("line {}", run.line),
+        |file| format!("{file}: line {}", run.line),
+    )
 }
 
 fn check_game_support(program: &DispatchProgram, hello: &Value) -> Result<bool> {
     let runs = program_runs(program);
+    if (hello["input_control_flow"] != true || hello["pause_queue"] != true)
+        && let Some(run) = runs
+            .clone()
+            .find(|run| run.flow.is_some() || run.has_flow_expression)
+    {
+        let location = run_location(run);
+        return Err(format!("{location}: this input script requires an updated Fabric mod with input_control_flow and pause_queue").into());
+    }
     let uses_functions = !program.functions.is_empty() || runs.clone().any(|r| r.control.is_some());
     let uses_values = !program.params.is_empty() || runs.clone().any(|r| r.values.is_some());
     if uses_values && (hello["input_values"] != true || hello["pause_queue"] != true) {
@@ -88,10 +117,7 @@ fn check_game_support(program: &DispatchProgram, hello: &Value) -> Result<bool> 
         return Err("FUNCTION and RETURN require an updated Fabric mod with input_functions and pause_queue".into());
     }
     for run in runs {
-        let location = run.file.as_ref().map_or_else(
-            || format!("line {}", run.line),
-            |file| format!("{file}: line {}", run.line),
-        );
+        let location = run_location(run);
         if (run.handler.is_some() || run.clear_listeners || run.screenshot.is_some())
             && hello["input_events"] != true
         {
@@ -204,7 +230,10 @@ fn encode_runs(runs: Vec<KeyRun>, queue_supported: bool) -> Result<Vec<Value>> {
             }
             if let Some((event, body)) = r.handler {
                 run["event"] = json!(event);
-                run["body"] = json!(encode_runs(body, queue_supported)?);
+                run["body"] = Value::Array(encode_runs(body, queue_supported)?);
+            }
+            if let Some(flow) = r.flow {
+                run["flow"] = encode_flow(flow, queue_supported)?;
             }
             if r.clear_listeners {
                 run["clear_listeners"] = json!(true);
@@ -222,6 +251,46 @@ fn encode_runs(runs: Vec<KeyRun>, queue_supported: bool) -> Result<Vec<Value>> {
         .collect()
 }
 
+fn encode_flow(flow: FlowRun, queue_supported: bool) -> Result<Value> {
+    let flow = match flow {
+        FlowRun::If(branches) => {
+            let branches = branches
+                .into_iter()
+                .map(|branch| {
+                    let mut wire = json!({"line": branch.line});
+                    if let Some(condition) = branch.condition {
+                        wire["expr"] = condition;
+                    }
+                    wire["body"] = Value::Array(encode_runs(branch.body, queue_supported)?);
+                    Ok(wire)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let mut wire = json!({"op":"if"});
+            wire["branches"] = Value::Array(branches);
+            wire
+        }
+        FlowRun::While { condition, body } => {
+            let mut wire = json!({"op":"while"});
+            wire["expr"] = condition;
+            wire["body"] = Value::Array(encode_runs(body, queue_supported)?);
+            wire
+        }
+        FlowRun::For {
+            name,
+            expression,
+            body,
+        } => {
+            let mut wire = json!({"op":"for","name":name});
+            wire["expr"] = expression;
+            wire["body"] = Value::Array(encode_runs(body, queue_supported)?);
+            wire
+        }
+        FlowRun::Break => json!({"op":"break"}),
+        FlowRun::Continue => json!({"op":"continue"}),
+    };
+    Ok(flow)
+}
+
 fn encode_program(program: DispatchProgram, hello: &Value, max_speed: f64) -> Result<Value> {
     let uses_functions = check_game_support(&program, hello)?;
     let queue_supported = hello["pause_queue"] == true;
@@ -229,7 +298,9 @@ fn encode_program(program: DispatchProgram, hello: &Value, max_speed: f64) -> Re
         return Err("PAUSE requires the pause_queue Fabric mod update; update the mod and restart Minecraft".into());
     }
     let runs = encode_runs(program.runs, queue_supported)?;
-    let mut request = json!({"keys":program.keys,"runs":runs,"persistent":program.persistent,"max_speed":max_speed});
+    let mut request =
+        json!({"keys":program.keys,"persistent":program.persistent,"max_speed":max_speed});
+    request["runs"] = Value::Array(runs);
     if queue_supported {
         request["queue_version"] = json!(1);
     }
@@ -237,9 +308,9 @@ fn encode_program(program: DispatchProgram, hello: &Value, max_speed: f64) -> Re
         let functions = program
             .functions
             .into_iter()
-            .map(|(name, body)| Ok((name, encode_runs(body, queue_supported)?)))
-            .collect::<Result<BTreeMap<_, _>>>()?;
-        request["functions"] = json!(functions);
+            .map(|(name, body)| Ok((name, Value::Array(encode_runs(body, queue_supported)?))))
+            .collect::<Result<serde_json::Map<_, _>>>()?;
+        request["functions"] = Value::Object(functions);
     }
     if !program.params.is_empty() {
         request["params"] = json!(program.params);
@@ -248,9 +319,9 @@ fn encode_program(program: DispatchProgram, hello: &Value, max_speed: f64) -> Re
         let checks = program
             .checks
             .into_iter()
-            .map(|body| encode_runs(body, queue_supported))
+            .map(|body| encode_runs(body, queue_supported).map(Value::Array))
             .collect::<Result<Vec<_>>>()?;
-        request["checks"] = json!(checks);
+        request["checks"] = Value::Array(checks);
     }
     Ok(request)
 }
@@ -856,5 +927,173 @@ mod tests {
             json!({"expr":["var","name"]})
         );
         assert_eq!(request["runs"][4]["line"], 12);
+    }
+
+    #[test]
+    fn control_flow_wire_preserves_nested_runs_and_only_consumes_intra_chain_blanks() {
+        let script = Script::parse(concat!(
+            "BEGIN\nFOR $item IN [true]\nBEGIN\nIF ($item)\nBEGIN\n\nCONTINUE\nEND\n",
+            "  \n// skip\n\nELIF (false)\nBEGIN\nBREAK\nEND\n\nELSE\nBEGIN\nKey(a)\nEND\n",
+            "\n  \nKey(w)\nEND\nWHILE (false)\nBEGIN\nEND\nEND"
+        ))
+        .unwrap();
+        let hello = json!({"pause_queue":true,"input_control_flow":true});
+        let request = encode_program(script.compile(Default::default()), &hello, 50.).unwrap();
+        let runs = request["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0]["ticks"], "0");
+        assert_eq!(runs[0]["source"], "FOR $item IN [true]");
+        let flow = &runs[0]["flow"];
+        assert_eq!(flow["op"], "for");
+        assert_eq!(flow["name"], "item");
+        assert_eq!(flow["expr"], json!(["array", ["lit", true]]));
+        let body = flow["body"].as_array().unwrap();
+        assert_eq!(body.len(), 4);
+        assert_eq!(body[0]["source"], "IF ($item)");
+        let branches = body[0]["flow"]["branches"].as_array().unwrap();
+        assert_eq!(branches.len(), 3);
+        assert_eq!(branches[0]["line"], 4);
+        assert_eq!(branches[0]["expr"], json!(["var", "item"]));
+        assert_eq!(branches[0]["body"][0]["line"], 6);
+        assert_eq!(branches[0]["body"][0]["ticks"], "1");
+        assert_eq!(branches[0]["body"][1]["flow"], json!({"op":"continue"}));
+        assert_eq!(branches[1]["line"], 12);
+        assert_eq!(branches[1]["body"][0]["flow"], json!({"op":"break"}));
+        assert_eq!(branches[2]["line"], 17);
+        assert!(branches[2].get("expr").is_none());
+        assert_eq!(
+            branches[2]["body"][0]["key_actions"],
+            json!({"a":"temporary"})
+        );
+        assert_eq!(body[1]["line"], 21);
+        assert_eq!(body[2]["line"], 22);
+        assert_eq!(body[1]["ticks"], "1");
+        assert_eq!(body[2]["ticks"], "1");
+        assert_eq!(body[3]["source"], "Key(w)");
+        assert_eq!(request["keys"], json!({"a":19,"w":23}));
+        assert_eq!(
+            runs[1]["flow"],
+            json!({"op":"while","expr":["lit",false],"body":[]})
+        );
+    }
+
+    #[test]
+    fn control_flow_and_its_expressions_require_the_advertised_capability() {
+        for (source, line) in [
+            ("BEGIN\nIF (false)\nBEGIN\nEND\nEND", 2),
+            ("BEGIN\nLET $n = Len([])\nEND", 2),
+            ("BEGIN\nPrint(\"{}\", [0 < 1])\nEND", 2),
+            ("BEGIN\nLET $x = [0, 1]\nSET $x[Len([])] = 2\nEND", 3),
+            (
+                "BEGIN\nLET $x = [0, 1]\nSET $x[Len([$x[0] <= $x[1]])] = 2\nEND",
+                3,
+            ),
+            ("BEGIN\nWait(Len([1])) Key(w)\nEND", 2),
+            ("BEGIN\nMouseMove(Px(Len([1])), Px(0))\nEND", 2),
+            (
+                "FUNCTION $unused\nBEGIN\nON(Hurt)\nBEGIN\nIF (true)\nBEGIN\nEND\nEND\nEND\nBEGIN\nEND",
+                5,
+            ),
+        ] {
+            let script = Script::parse(source).unwrap();
+            let mut hello = json!({"pause_queue":true,"input_values":true,"input_functions":true,"input_events":true,"mouse_input":true});
+            let old = encode_program(script.compile(Default::default()), &hello, 50.).unwrap_err();
+            assert!(old.to_string().contains("input_control_flow"), "{old}");
+            assert!(old.to_string().contains(&format!("line {line}")), "{old}");
+            hello["input_control_flow"] = json!(true);
+            assert!(encode_program(script.compile(Default::default()), &hello, 50.).is_ok());
+        }
+    }
+
+    #[test]
+    fn excessively_nested_control_flow_fails_before_compilation() {
+        for levels in [31, 3000] {
+            let source = format!(
+                "BEGIN\n{}Key(w)\n{}END",
+                "IF (true)\nBEGIN\n".repeat(levels),
+                "END\n".repeat(levels)
+            );
+            let error = Script::parse(&source).unwrap_err();
+            assert_eq!(error.line, 62);
+            assert!(error.message.contains("nesting"), "{error}");
+        }
+    }
+
+    #[test]
+    fn deeply_nested_control_flow_encodes_within_the_game_json_depth_limit() {
+        let source = format!(
+            "FUNCTION $nested\nBEGIN\n{}Print(\"{{}}\", {}0{})\n{}END\nBEGIN\n$nested()\nEND",
+            "IF (true)\nBEGIN\n".repeat(30),
+            "{k:".repeat(47),
+            "}".repeat(47),
+            "END\n".repeat(30)
+        );
+        let script = Script::parse(&source).unwrap();
+        let hello = json!({"pause_queue":true,"input_control_flow":true,"input_functions":true,"input_values":true});
+        let request = encode_program(script.compile(Default::default()), &hello, 50.).unwrap();
+        let mut stack = vec![(&request, 0)];
+        while let Some((value, parent_depth)) = stack.pop() {
+            let depth = parent_depth + 1;
+            match value {
+                Value::Array(values) => stack.extend(values.iter().map(|value| (value, depth))),
+                Value::Object(fields) => stack.extend(fields.values().map(|value| (value, depth))),
+                _ => continue,
+            }
+            assert!(depth <= 255, "JSON nesting at depth {depth}");
+        }
+        assert!(
+            serde_json::to_vec(&request)
+                .unwrap()
+                .windows(8)
+                .any(|bytes| bytes == b"\"print\"}")
+        );
+    }
+
+    #[test]
+    fn imported_demo_control_flow_is_checked_at_its_original_location() {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp =
+            std::env::temp_dir().join(format!("mc-flow-wire-{}-{timestamp}", std::process::id()));
+        std::fs::create_dir(&temp).unwrap();
+        let library = temp.join("demo.mcinput");
+        std::fs::write(
+            &library,
+            concat!(
+                "BEGIN\nIF (false)\nBEGIN\nKey(demo_key)\nON(Hurt)\nBEGIN\n",
+                "WHILE (false)\nBEGIN\nMouse(left)\nEND\nEND\nEND\nEND"
+            ),
+        )
+        .unwrap();
+        let source = ScriptSource::Inline("IMPORT \"demo.mcinput\"\nBEGIN\nKey(w)\nEND");
+        let script = source.load(&temp).unwrap();
+        let path = library.canonicalize().unwrap().display().to_string();
+        std::fs::remove_dir_all(&temp).unwrap();
+
+        let mut hello = json!({"pause_queue":true,"input_events":true});
+        let error = encode_program(script.compile(Default::default()), &hello, 50.).unwrap_err();
+        assert!(
+            error.to_string().contains(&format!("{path}: line 2")),
+            "{error}"
+        );
+        assert!(error.to_string().contains("input_control_flow"), "{error}");
+        hello["input_control_flow"] = json!(true);
+        let error = encode_program(script.compile(Default::default()), &hello, 50.).unwrap_err();
+        assert!(
+            error.to_string().contains(&format!("{path}: line 9")),
+            "{error}"
+        );
+        assert!(error.to_string().contains("keyboard input"), "{error}");
+        hello["mouse_input"] = json!(true);
+        let program = encode_program(script.compile(Default::default()), &hello, 50.).unwrap();
+        assert_eq!(program["runs"].as_array().unwrap().len(), 1);
+        assert_eq!(program["runs"][0]["source"], "Key(w)");
+        let branch = &program["checks"][0][0]["flow"]["branches"][0]["body"];
+        assert_eq!(branch[0]["file"], path);
+        assert_eq!(branch[0]["line"], 4);
+        assert_eq!(script.key_location("demo_key"), Some((path.as_str(), 4)));
+        assert_eq!(program["keys"]["demo_key"], 4);
     }
 }
