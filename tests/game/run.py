@@ -143,6 +143,8 @@ def exercise(client, work, log, codex_env, wait_ready, transitions_only=False, t
             time.sleep(.02)
         initial = play(block("Wait(2)"), 2, "initial")
     exercise_mouse(work, log, play, rpc, block, initial)
+    from max_ticks import exercise_max_ticks
+    exercise_max_ticks(work, log, play, rpc, block, inspect)
 
     play(block("Mouse(left)"), 1, "temporary-left")
     expected = {"world": "paused", "held": {"keys": {}, "buttons": {"left": "temporary"}},

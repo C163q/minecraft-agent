@@ -26,8 +26,8 @@ def exercise_world_transitions(work, log, play, rpc, block, inspect, delays=None
         x, y = point
         return f"MouseMoveTo(Px({x}), Px({y}))"
 
-    def send(*lines, ticks=None, image=None, world="not_needed"):
-        arguments = block(*lines)
+    def send(*lines, ticks=None, image=None, world="not_needed", **options):
+        arguments = dict(block(*lines), **options)
         if image is None:
             arguments["include_screenshot"] = False
         return play(arguments, ticks, image or "transition-text", world, timeout=40)
@@ -87,7 +87,7 @@ def exercise_world_transitions(work, log, play, rpc, block, inspect, delays=None
     ordinary(send("Key(left_control) Key(a)", "Key(t)", "Key(e)", "Key(s)", "Key(t)", "Key(a)", ticks=6))
     assert fixture("flat") == "testa"
     move("button selectWorld.create")
-    created = send("Mouse(left)", ticks=1, image="transition-created", world="paused")
+    created = send("Mouse(left)", ticks=1, max_ticks=1, image="transition-created", world="paused")
     transition(created, "enter", None)
     marked = rpc("tools/call", {"name": "cursor_hint", "arguments": {
         "screenshot_id": created["screenshot_id"], "x": created["width"] // 2, "y": created["height"] // 2,
@@ -121,7 +121,7 @@ def exercise_world_transitions(work, log, play, rpc, block, inspect, delays=None
     left = send("ON(ScreenOpened)", "BEGIN", "Wait(1000)", "Key(y)", "END",
                 "Key(escape)", quit_position, "Wait(20)",
                 "Mouse(left) Mouse(right) MouseMove(Px(1), Px(0), Px(0.1))", "Key(y)", "Wait(200)",
-                ticks=23, image="transition-left")
+                ticks=23, max_ticks=23, image="transition-left")
     transition(left, "leave", "TitleScreen")
     handler, = left["events"]
     assert handler["event"] == "ScreenOpened" and handler["screen"] == "PauseScreen", left

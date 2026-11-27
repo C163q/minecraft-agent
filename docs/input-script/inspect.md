@@ -51,6 +51,6 @@ END
 
 涉及[函数调用](functions.md)的条目和监听来源带 `call_stack`。每层的 `id` 区分不同次调用，`name` 是函数名，`line` 是调用点所在的脚本行。尚未进入的函数只显示调用点。
 
-有活动调用时，`active_calls` 按执行分支列出块号、调用栈、当前函数上一步的 `last_line` 和接下来的 `next`，有源行时附 `next_line`。例如函数的最后一行是 `PAUSE`，暂停后 `next` 为 `END`：即便 `queue.total` 已是 0，该调用仍在等待恢复后返回。达到执行上限时，`pause_reason` 为 `error`，`last_error` 保留到下次恢复。
+有活动调用时，`active_calls` 按执行分支列出块号、调用栈、当前函数上一步的 `last_line` 和接下来的 `next`，有源行时附 `next_line`。例如函数的最后一行是 `PAUSE`，暂停后 `next` 为 `END`：即便 `queue.total` 已是 0，该调用仍在等待恢复后返回。触及函数递归或零拍执行的保护上限时，`pause_reason` 为 `error`，`last_error` 保留到下次恢复。
 
 支持事件的 Mod 返回 `listeners`，每项包含 `event`、所属顶层 `block`、声明的 `line` 和 `state`。状态 `ready` 表示可响应事件，`handling` 表示正在执行上一次处理块。来自事件的队列段带 `listener` 对象，其中的块和行号指向原声明。清除监听后，仍待执行的段保留这个来源。预览、分页快照和完整导出沿用同一格式。详见[玩家事件](events.md)。

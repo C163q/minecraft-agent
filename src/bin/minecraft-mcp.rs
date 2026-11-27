@@ -20,6 +20,8 @@ use std::{
     thread,
 };
 
+const DEFAULT_MAX_TICKS: i64 = 600;
+
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 fn receive(reader: &mut impl BufRead) -> Result<Value> {
@@ -213,12 +215,21 @@ fn encode_program(program: DispatchProgram, hello: &Value, max_speed: f64) -> Re
 
 fn play(args: &Value, call: &Mutex<Call>) -> Result<Value> {
     let args = args.as_object().ok_or("expected script or path")?;
-    if args
-        .keys()
-        .any(|key| !matches!(key.as_str(), "script" | "path" | "include_screenshot"))
-    {
+    if args.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "script" | "path" | "include_screenshot" | "max_ticks"
+        )
+    }) {
         return Err("unknown input_script argument".into());
     }
+    let max_ticks = match args.get("max_ticks") {
+        Some(value) => value
+            .as_i64()
+            .filter(|&ticks| ticks > 0)
+            .ok_or("max_ticks must be a positive 64-bit integer")?,
+        None => DEFAULT_MAX_TICKS,
+    };
     let include_screenshot = match args.get("include_screenshot") {
         Some(value) => value
             .as_bool()
@@ -233,9 +244,13 @@ fn play(args: &Value, call: &Mutex<Call>) -> Result<Value> {
     let script = source.load(&env::current_dir()?)?;
     let max_speed = max_mouse_speed()?;
     let (mut reader, hello) = connect_game(call)?;
+    if hello["max_ticks"] != true {
+        return Err("input_script requires a Fabric mod with max_ticks support; update the mod and restart Minecraft".into());
+    }
     let persistent: BTreeSet<String> = serde_json::from_value(hello["persistent"].clone())?;
     let program = script.compile(persistent);
     let mut request = encode_program(program, &hello, max_speed)?;
+    request["max_ticks"] = json!(max_ticks);
     if !include_screenshot {
         request["include_screenshot"] = json!(false);
     }
@@ -292,7 +307,24 @@ fn respond(request: &Value) -> Value {
             json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"minecraft-agent","version":env!("CARGO_PKG_VERSION")}})
         }
         Some("tools/list") => {
-            json!({"tools":[{"name":"input_script","description":"Run a keyboard and mouse input script from exactly one of script or path and return the result at PAUSE, a pause shortcut, END, or a single-player save transition. See docs/input-script/README.md.","inputSchema":{"type":"object","properties":{"script":{"type":"string"},"path":{"type":"string"},"include_screenshot":{"type":"boolean","default":true,"description":"Include the stopped frame as a PNG image."}},"additionalProperties":false}},queue::tool(),hints::tool(),game_state::tool()]})
+            let input_script = json!({
+                "name":"input_script",
+                "description":"Run a keyboard and mouse input script from exactly one of script or path and return at PAUSE, a pause shortcut, END, the input tick limit, or a single-player save transition. See docs/input-script/README.md.",
+                "inputSchema":{
+                    "type":"object",
+                    "properties":{
+                        "script":{"type":"string"},
+                        "path":{"type":"string"},
+                        "include_screenshot":{"type":"boolean","default":true,"description":"Include the stopped frame as a PNG image."},
+                        "max_ticks":{
+                            "type":"integer","minimum":1,"maximum":i64::MAX,"default":DEFAULT_MAX_TICKS,
+                            "description":"Pause after this many input ticks in this call if playback would continue. Pending input is retained."
+                        }
+                    },
+                    "additionalProperties":false
+                }
+            });
+            json!({"tools":[input_script,queue::tool(),hints::tool(),game_state::tool()]})
         }
         Some("ping") => json!({}),
         method => {
@@ -443,6 +475,28 @@ mod tests {
         );
         std::fs::remove_file(&library).unwrap();
         std::fs::remove_dir(&temp).unwrap();
+    }
+
+    #[test]
+    fn max_ticks_is_advertised_and_validated_before_loading_the_script() {
+        let reply = respond(&json!({"method":"tools/list"}));
+        let schema = &reply["result"]["tools"][0]["inputSchema"]["properties"]["max_ticks"];
+        assert_eq!(schema["type"], "integer");
+        assert_eq!(schema["default"], 600);
+        assert_eq!(schema["minimum"], 1);
+        for invalid in [
+            json!(0),
+            json!(-1),
+            json!(0.5),
+            json!("1"),
+            json!(true),
+            Value::Null,
+            json!(u64::MAX),
+        ] {
+            let args = json!({"path":"missing.input","max_ticks":invalid});
+            let error = play(&args, &Mutex::default()).unwrap_err().to_string();
+            assert!(error.contains("max_ticks"), "{error}");
+        }
     }
 
     #[test]

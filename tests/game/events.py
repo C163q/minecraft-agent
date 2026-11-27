@@ -4,8 +4,8 @@ from textwrap import dedent
 
 
 def exercise_events(work, log, play, rpc, block, inspect, codex_env=None):
-    def send(lines, ticks=None, name="event-status", image=False):
-        return play(dict(block(*lines), include_screenshot=image), ticks, name)
+    def send(lines, ticks=None, name="event-status", image=False, **options):
+        return play(dict(block(*lines), include_screenshot=image, **options), ticks, name)
 
     def hit(mode):
         (work / "test-hit").write_text(mode)
@@ -65,7 +65,7 @@ def exercise_events(work, log, play, rpc, block, inspect, codex_env=None):
     send(["CLEAR"], 0)
     both = [*handler("HpLost", "PAUSE"), *handler("HpLost", "PAUSE"), "Wait(4)"]
     hit("client-drop")
-    result = send(both, 1)
+    result = send(both, 1, max_ticks=1)
     assert [o["line"] for o in result["pause_listeners"]] == [2, 6], result
     assert result["events"] == [{"event": "HpLost", "listeners": result["pause_listeners"]}], result
 

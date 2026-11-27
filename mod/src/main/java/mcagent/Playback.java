@@ -79,11 +79,20 @@ public final class Playback {
         final CompletableFuture<Observation> result;
         final EventJournal events = new EventJournal();
         final boolean includeScreenshot;
+        final long maxTicks;
         long executed;
         long deathObservation;
 
         Request(JsonObject program, CompletableFuture<Observation> result) {
             this.result = result;
+            var limit = program.get("max_ticks");
+            try {
+                maxTicks = limit == null ? 600 : Long.parseLong(limit.getAsString());
+            } catch (RuntimeException invalid) {
+                throw new IllegalArgumentException("max_ticks must be a positive 64-bit integer", invalid);
+            }
+            if (maxTicks <= 0 || (limit != null && !(limit.isJsonPrimitive() && limit.getAsJsonPrimitive().isNumber())))
+                throw new IllegalArgumentException("max_ticks must be a positive 64-bit integer");
             var option = program.get("include_screenshot");
             if (option != null && !(option.isJsonPrimitive() && option.getAsJsonPrimitive().isBoolean()))
                 throw new IllegalArgumentException("include_screenshot must be a boolean");
@@ -408,6 +417,7 @@ public final class Playback {
             if (queue.pauseListeners().isEmpty()) boundary = "hotkey";
         }
         screenshotPaths = queue.takeScreenshots();
+        if (boundary == null && active != null && active.executed >= active.maxTicks) boundary = "max_ticks";
         if (boundary == null && !screenshotPaths.isEmpty()) boundary = "capture";
         if (boundary != null) stop(mc, boundary);
     }

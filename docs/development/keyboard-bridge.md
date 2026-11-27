@@ -11,7 +11,7 @@ cargo build --release --bin minecraft-mcp
 python3 mod/build.py /absolute/game-root/versions/26.3-Fabric/26.3-Fabric.json
 ```
 
-产物为 `target/release/minecraft-mcp` 和 `mod/build/minecraft-agent.jar`。Python 构建脚本从实例清单组装类路径，使用 JDK 自带的 `javac` 和 `jar`，运行时依赖游戏和 Loader。将 Mod JAR 复制到目标 Fabric 实例实际使用的 `mods/`，重启实例。新 MCP 在发送鼠标操作前会检查 Mod 能力。
+产物为 `target/release/minecraft-mcp` 和 `mod/build/minecraft-agent.jar`。Python 构建脚本从实例清单组装类路径，使用 JDK 自带的 `javac` 和 `jar`，运行时依赖游戏和 Loader。将 Mod JAR 复制到目标 Fabric 实例实际使用的 `mods/`，重启实例。新版 MCP 在发送输入前检查 Mod 是否声明支持 `max_ticks`。使用旧 Mod 时，须更新 JAR 并重启目标实例后才能执行脚本。
 
 ## 连接
 

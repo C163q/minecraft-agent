@@ -45,6 +45,8 @@ END
 
 两种来源均支持[导入函数文件](imports.md)。写在文件中的相对导入路径从该文件所在目录解析。
 
+内联和文件提交均支持用 `max_ticks` 限制本次执行的拍数。参见[限制单次调用的拍数](pause.md#限制单次调用的拍数)。
+
 ## 停止时是否返回截图
 
 工具参数 `include_screenshot` 是可选布尔值，默认为 `true`，适用于 `script` 和 `path`。例如，只查询这次执行的停止状态：
@@ -53,7 +55,7 @@ END
 {"script":"BEGIN\nWait(5) PAUSE\nEND","include_screenshot":false}
 ```
 
-到达 `PAUSE`、`END` 或被暂停快捷键打断时，这次调用只返回文本状态，包含 `ticks`、`world` 和 `pause_reason`。停止确认、输入队列和恢复规则与默认模式相同。需要看图时，在下一次调用省略此参数或传 `true`，即可取得 PNG、原图尺寸和供 `cursor_hint` 使用的 `screenshot_id`。
+传入 `false` 后，这次调用在停止时只返回文本状态，包含 `ticks`、`world` 和 `pause_reason`。停止确认、输入队列和恢复规则与默认模式相同。需要看图时，在下一次调用省略此参数或传 `true`，即可取得 PNG、原图尺寸和供 `cursor_hint` 使用的 `screenshot_id`。
 
 通过菜单[进入单人存档或保存退出](pause.md#进入存档与保存退出)时，同一参数控制是否返回目的地或当前过渡界面的截图。
 

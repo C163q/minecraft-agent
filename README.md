@@ -49,7 +49,7 @@ printf 'MINECRAFT_AGENT_SOCKET=%s\n' "$socket_path"
 
 | 工具 | 用途 |
 | --- | --- |
-| `input_script` | 从文本或 UTF-8 文件逐拍执行输入。可在方块挖掉、玩家离地或界面打开时暂停；返回命中的监听及其现场数据，默认附截图。[事件参考](docs/input-script/events.md) |
+| `input_script` | 从文本或 UTF-8 文件逐拍执行输入。每次最多执行 `max_ticks` 拍（默认 600），[到上限可续跑](docs/input-script/pause.md#限制单次调用的拍数)。可在方块挖掉、玩家离地或界面打开时暂停；返回命中的监听及其现场数据，默认附截图。[事件参考](docs/input-script/events.md) |
 | `inspect_input` | 查看保持的键、鼠标移动、监听和待执行队列，消耗零拍。 |
 | `inspect_game` | 查询玩家坐标、朝向、双手物品、生命、饥饿、氧气及原版准星目标。默认只返回数据，传 `{"include_screenshot":true}` 同时取得该帧截图。 |
 | `cursor_hint` | 在截图的指定坐标标点；第一人称截图还可给出瞄准所需的转角。 |
