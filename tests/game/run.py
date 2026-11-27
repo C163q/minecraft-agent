@@ -15,6 +15,7 @@ root = Path(__file__).resolve().parents[2]
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(root / "mod"))
 from build import build_jar, game_classpath
+from game_state import exercise_game, exercise_game_exit, inspect_title
 from mouse import exercise_mouse
 from PIL import Image
 
@@ -42,21 +43,21 @@ def exercise(client, work, log, codex_env, wait_ready):
         client.stdin.flush()
         return serial
 
-    def receive(request_id):
-        if not select.select([client.stdout], [], [], 25)[0]:
+    def receive(request_id, timeout=25):
+        if not select.select([client.stdout], [], [], timeout)[0]:
             raise TimeoutError(request_id)
         reply = json.loads(client.stdout.readline())
         assert reply["id"] == request_id, reply.keys()
         return reply["result"]
 
-    def rpc(method, params):
-        return receive(submit(method, params))
+    def rpc(method, params, timeout=25):
+        return receive(submit(method, params), timeout)
 
     rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}})
     client.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
     client.stdin.flush()
     tools = {t["name"]: t for t in rpc("tools/list", {})["tools"]}
-    assert set(tools) == {"input_script", "cursor_hint", "inspect_input"}
+    assert set(tools) == {"input_script", "cursor_hint", "inspect_input", "inspect_game"}, tools.keys()
     option = tools["input_script"]["inputSchema"]["properties"]["include_screenshot"]
     assert option["type"] == "boolean" and option["default"] is True
 
@@ -94,6 +95,9 @@ def exercise(client, work, log, codex_env, wait_ready):
         assert reply["structuredContent"] == state
         return state
 
+    inspect_title(rpc, tools["inspect_game"])
+    (work / "title-done").touch()
+    wait_ready("name-ready")
     play(block("Key(left_control) Key(a)", "Key(backspace)", "Key(left_shift) Key(a)", "Key(b)",
                "Key(c)", "KeyPress(d)", "Wait(2)", "KeyRelease(d)", "Key(space)", "Key(1)",
                "Key(backspace)", "Key(left_shift) Key(1)"), 13, "world-name", world="not_needed")
@@ -102,6 +106,7 @@ def exercise(client, work, log, codex_env, wait_ready):
     (work / "name-done").touch()
     wait_ready("ready")
     assert inspect()["world"] == "unpaused"
+    exercise_game(work, log, play, rpc, block, inspect)
     from pause_binding import observer_input
     play(block("Key(t)", "Wait(2)", "Key(b)", "Key(left_shift) Key(c)"), 5, "chat-text")
     observer_input(work, "read-text")
@@ -230,6 +235,7 @@ def exercise(client, work, log, codex_env, wait_ready):
     exercise_imports(work, play, rpc, block, inspect)
     from events import exercise_events
     exercise_events(work, log, play, rpc, block, inspect, codex_env)
+    exercise_game_exit(work, rpc)
     print("PASS: eight ticks, handoff, remapping, invalid input, native pause, catch-up ticks, cancellation and END images.")
 
 
@@ -275,7 +281,7 @@ def main():
                     if game.poll() is not None or time.monotonic() > deadline:
                         raise RuntimeError(f"Game setup failed waiting for {marker}; see {log}")
                     time.sleep(.1)
-            wait_ready("name-ready")
+            wait_ready("title-ready")
             client = subprocess.Popen([root / "target/debug/minecraft-mcp"], env=env, cwd=work,
                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
             try:

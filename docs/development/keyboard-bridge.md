@@ -51,6 +51,10 @@ MINECRAFT_AGENT_SOCKET = "/run/user/1000/minecraft-agent.sock"
 
 `inspect_input` 在游戏线程一次性复制键和按钮的实际脚本保持状态、活动位移与限速。它通过独立的游戏只读请求读取状态，和脚本提交共用实例的串行连接。Rust MCP 在主机端对不可变队列快照分页或导出文件。MCP 返回相同的 JSON 文本及 `structuredContent`。较旧的 Mod 缺少查询能力时，MCP 会提示更新。字段和使用示例见[查询当前输入状态](../input-script/inspect.md)。
 
+`inspect_game` 共用串行连接。Mod 在握手中声明同名能力，[GameInspection](../../mod/src/main/java/mcagent/GameInspection.java) 在一次客户端绘制完成后采样 `Minecraft.hitResult`、当前界面和玩家字段。需要图片时，在同一帧读回渲染目标并记录相机。Rust 用现有图片缓存登记该帧，默认查询只传递状态。处于运行中的世界按客户端已经收到的更新采样，查询独立于脚本暂停时的服务端同步。[状态字段与示例](../inspect-game.md)
+
+26.3 保存退出时会丢弃等待执行的客户端任务，并在等待内置服务器退出期间继续绘制界面。Mod 自行保留待握手和待查询的请求，客户端可在过渡帧完成采样。实机测试在原版退出前发起查询，通过同一 MCP 进程继续观察，直到标题页。
+
 ## 开发验证
 
 从项目根目录运行 `cargo test --offline` 和 `cargo clippy --offline --all-targets -- -D warnings`。首次获取依赖需先执行常规 Cargo 构建。图形验证需要 Python Pillow、已安装的游戏资源、可用的图形桌面和本地套接字权限：

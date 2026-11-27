@@ -3,12 +3,15 @@ package mcagenttest;
 import com.mojang.blaze3d.platform.InputConstants;
 import java.nio.file.*;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
 import net.fabricmc.api.ClientModInitializer;
 import net.minecraft.client.*;
 import net.minecraft.client.gui.components.EditBox;
+import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.gui.screens.options.controls.KeyBindsScreen;
 import net.minecraft.client.gui.screens.worldselection.CreateWorldScreen;
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.resources.language.I18n;
 import net.minecraft.world.item.*;
 import net.minecraft.world.level.*;
@@ -23,6 +26,7 @@ import static org.lwjgl.sdl.SDLEvents.*;
 public final class Observer implements ClientModInitializer {
     public static volatile boolean recording, slow, measureWorld;
     public static long frame;
+    private final InspectFixture inspectFixture = new InspectFixture();
 
     private void await(BooleanSupplier condition) throws Exception {
         await(condition, 100);
@@ -94,6 +98,11 @@ public final class Observer implements ClientModInitializer {
                 Files.delete(request);
                 return;
             }
+            if (command[0].equals("inspect-fixture")) {
+                inspectFixture.apply(mc, command[1]);
+                Files.delete(request);
+                return;
+            }
             var key = InputConstants.getKey("key.keyboard." + command[1]);
             var controls = mc.submit(() -> {
                 if (command[0].equals("bind")) {
@@ -149,11 +158,31 @@ public final class Observer implements ClientModInitializer {
         mc.submit(() -> mc.gui.screen().onClose()).join();
     }
 
+    private void leaveWorldFixture(Minecraft mc) {
+        var request = Path.of("leave-world");
+        if (!Files.exists(request)) return;
+        mc.submit(() -> {
+            if (mc.level == null || mc.getSingleplayerServer() == null)
+                throw new IllegalStateException("missing test world before disconnect");
+            try {
+                Files.delete(request);
+                Files.createFile(Path.of("disconnect-ready"));
+            } catch (java.io.IOException error) { throw new java.io.UncheckedIOException(error); }
+            // Let stdio begin the query while the client is still about to clear vanilla queued tasks.
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(750));
+            mc.disconnectFromWorld(ClientLevel.DEFAULT_QUIT_MESSAGE);
+        }).join();
+    }
+
     @Override public void onInitializeClient() {
         Thread.ofPlatform().daemon().start(() -> {
             var mc = Minecraft.getInstance();
             try {
-                await(() -> mc.submit(() -> mc.gui != null && mc.gui.screen() != null && mc.gui.overlay() == null).join());
+                await(() -> mc.submit(() -> mc.gui != null && mc.gui.screen() instanceof TitleScreen
+                    && mc.gui.overlay() == null).join());
+                Files.createFile(Path.of("title-ready"));
+                await(() -> Files.exists(Path.of("title-done")) || Files.exists(Path.of("done")));
+                if (Files.exists(Path.of("done"))) return;
                 worldNameFixture(mc);
                 if (Files.exists(Path.of("done"))) return;
                 mc.submit(() -> {
@@ -189,6 +218,7 @@ public final class Observer implements ClientModInitializer {
                 Files.createFile(Path.of("ready"));
                 await(() -> {
                     observerInput(mc);
+                    leaveWorldFixture(mc);
                     if (Files.exists(Path.of("inspect-player"))) {
                         String state = mc.submit(() -> {
                             var p = mc.player;

@@ -1,10 +1,10 @@
 # 根据截图标点与瞄准
 
-`input_script` 默认返回停止帧的 PNG、原始宽高和 `screenshot_id`。`cursor_hint` 在原图的副本上标红点和红环，返回带标记的 PNG、原始图像尺寸与所选像素。标点期间游戏保持原状态。
+`input_script` 默认返回停止帧的 PNG、原始宽高和 `screenshot_id`。[inspect_game](../inspect-game.md) 在传入 `{"include_screenshot":true}` 时也返回这些字段。`cursor_hint` 在原图的副本上标红点和红环，返回带标记的 PNG、原始图像尺寸与所选像素。标点期间游戏保持原状态。
 
 | 参数 | 填法 |
 | --- | --- |
-| `screenshot_id` 或 `path` | 两者选一。前者来自同一 MCP 进程的停止帧；后者是 MCP 主机上的 PNG 文件，可使用相对于 MCP 工作目录的路径 |
+| `screenshot_id` 或 `path` | 两者选一。前者来自同一 MCP 进程返回的游戏截图；后者是 MCP 主机上的 PNG 文件，可使用相对于 MCP 工作目录的路径 |
 | `x`、`y` | 原始 PNG 左上角为 (0, 0)。每轴可填零起算的整数像素或百分数字符串，如 `"25%"`。百分数范围 0% 到 100%，100% 指最后一个像素 |
 | `include_rotation` | 可选，默认为 `true`。传 `false` 只取标点和坐标 |
 

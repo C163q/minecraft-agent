@@ -1,6 +1,6 @@
 # Minecraft Agent
 
-让 LLM 看着 Minecraft Java Edition 的游戏画面操作键盘和鼠标。Fabric Mod 在游戏中执行输入，Rust MCP 通过本机 Unix 套接字连接 Mod，把停止状态和截图返回给 Codex 等 MCP 客户端。
+让 LLM 根据 Minecraft Java Edition 的游戏画面、玩家状态和准星目标操作键盘和鼠标。Fabric Mod 在游戏中执行输入并采样，Rust MCP 通过本机 Unix 套接字把结果返回给 Codex 等 MCP 客户端。
 
 ## 使用前提
 
@@ -51,7 +51,10 @@ printf 'MINECRAFT_AGENT_SOCKET=%s\n' "$socket_path"
 | --- | --- |
 | `input_script` | 从文本或 UTF-8 文件逐拍执行键盘、鼠标和事件脚本。暂停或结束时默认返回截图。 |
 | `inspect_input` | 查看保持的键、鼠标移动、监听和待执行队列，消耗零拍。 |
+| `inspect_game` | 查询玩家坐标、朝向、双手物品、生命、饥饿、氧气及原版准星目标。默认只返回数据，传 `{"include_screenshot":true}` 同时取得该帧截图。 |
 | `cursor_hint` | 在截图的指定坐标标点；第一人称截图还可给出瞄准所需的转角。 |
+
+例如让模型调用 `inspect_game({})` 查看面前的牛是否被草挡住。命中草时，`target` 包含方块 ID、坐标和命中面；命中牛时会给出 `minecraft:cow` 和实体 ID。查询保持游戏当前的运行或暂停状态。[游戏状态字段](docs/inspect-game.md)
 
 编写脚本时按需查阅[脚本语法参考](docs/input-script/README.md)。手动配置 MCP、调整鼠标限速和实机验证见[开发文档](docs/development/keyboard-bridge.md)。
 

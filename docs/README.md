@@ -5,6 +5,7 @@
 | 位置 | 职责 |
 | --- | --- |
 | [脚本语法参考](input-script/README.md) | 供用户与 LLM 编写输入脚本时按需查阅 |
+| [查询玩家和准星目标](inspect-game.md) | 查看游戏世界状态、玩家数值和原版命中结果 |
 | [项目协作约定](../AGENTS.md) | 开发阅读入口与游戏验证约定 |
 | [文档规范](documentation.md) | 文档读者、分类、命名及维护规则 |
 | `docs/ai/` | 对应 AI 开发环境的专项约定 |
@@ -36,4 +37,4 @@
 - [玩家死亡与分轴碰撞事件](superpowers/specs/2026-11-22-death-collision-events.md)
 - [输入脚本的函数与提前返回](superpowers/specs/2026-11-27-input-functions-design.md)，[实施与验证](superpowers/plans/2026-11-27-input-functions.md)
 - [输入脚本的 IMPORT 设计](superpowers/specs/2026-11-27-input-import-design.md)，[实施与验证](superpowers/plans/2026-11-27-input-import.md)
-- [查询当前游戏状态](superpowers/specs/2026-11-27-inspect-game-design.md)
+- [查询当前游戏状态](superpowers/specs/2026-11-27-inspect-game-design.md)，[实施与验证](superpowers/plans/2026-11-27-inspect-game.md)
