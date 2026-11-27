@@ -9,12 +9,15 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.Base64;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicReference;
 import net.fabricmc.api.ClientModInitializer;
 import net.minecraft.client.Minecraft;
 import org.slf4j.LoggerFactory;
 
 public final class GameBridge implements ClientModInitializer {
     private static final Gson JSON = new Gson();
+    private static final int IPC_TIMEOUT_SECONDS = 30;
+    private static final AtomicReference<CompletableFuture<Playback.Snapshot>> PENDING_HANDSHAKE = new AtomicReference<>();
 
     @Override public void onInitializeClient() {
         String socketPath = System.getenv("MINECRAFT_AGENT_SOCKET");
@@ -42,17 +45,21 @@ public final class GameBridge implements ClientModInitializer {
         }
     }
 
-    private static void send(SocketChannel peer, JsonObject message) throws IOException {
-        peer.configureBlocking(true);
-        ByteBuffer bytes = StandardCharsets.UTF_8.encode(JSON.toJson(message) + "\n");
-        while (bytes.hasRemaining()) peer.write(bytes);
+    private static void send(SocketChannel peer, String message) throws IOException, InterruptedException {
+        peer.configureBlocking(false);
+        ByteBuffer bytes = StandardCharsets.UTF_8.encode(message + "\n");
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(IPC_TIMEOUT_SECONDS);
+        while (bytes.hasRemaining()) {
+            if (deadline - System.nanoTime() <= 0) throw new IOException("timed out sending game response");
+            if (peer.write(bytes) == 0) Thread.sleep(10);
+        }
     }
 
     private static JsonObject readProgram(SocketChannel peer) throws Exception {
         peer.configureBlocking(false);
         var data = new ByteArrayOutputStream();
         var buf = ByteBuffer.allocate(8192);
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(IPC_TIMEOUT_SECONDS);
         while (System.nanoTime() < deadline) {
             int count = peer.read(buf);
             if (count < 0) throw new EOFException("client closed before submission");
@@ -72,61 +79,127 @@ public final class GameBridge implements ClientModInitializer {
     private static void serve(SocketChannel peer) throws Exception {
         var mc = Minecraft.getInstance();
         var engine = Playback.INSTANCE;
+        String response;
         try {
-            var snapshot = mc.submit(() -> engine.snapshot(mc)).join();
+            var snapshot = handshakeSnapshot();
             var hello = new JsonObject();
             hello.addProperty("mouse_input", true);
             hello.addProperty("inspect_input", true);
+            hello.addProperty("inspect_game", true);
             hello.addProperty("pause_queue", true);
             hello.addProperty("input_events", true);
             hello.addProperty("input_functions", true);
             hello.add("event_names", JSON.toJsonTree(InputQueue.EVENT_NAMES));
             hello.add("persistent", JSON.toJsonTree(snapshot.persistent()));
-            send(peer, hello);
+            send(peer, JSON.toJson(hello));
             var program = readProgram(peer);
             if (program.has("op")) {
-                if (!"inspect_input".equals(program.get("op").getAsString())) throw new IllegalArgumentException("unknown operation");
-                var state = mc.submit(() -> engine.inspect(mc)).join();
-                var reply = JSON.toJsonTree(state).getAsJsonObject();
-                if (!program.has("queue_version")) {
-                    reply.remove("queue_entries");
-                    reply.remove("pause_reason");
-                }
-                send(peer, reply);
-                return;
+                response = switch (program.get("op").getAsString()) {
+                    case "inspect_game" -> inspectGame(peer, program).toString(); // Preserve explicit JSON nulls.
+                    case "inspect_input" -> JSON.toJson(inspectInput(mc, engine, program));
+                    default -> throw new IllegalArgumentException("unknown operation");
+                };
+            } else {
+                response = JSON.toJson(play(mc, engine, peer, snapshot, program));
             }
-            var result = mc.submit(() -> engine.start(mc, snapshot, program)).join();
-            var probe = ByteBuffer.allocate(1);
-            Playback.Observation frame;
-            while (true) {
-                try {
-                    frame = result.get(100, TimeUnit.MILLISECONDS);
-                    break;
-                } catch (TimeoutException pending) {
-                    try {
-                        if (peer.read(probe) != 0) throw new EOFException("client disconnected or sent a second submission");
-                    } catch (IOException error) {
-                        mc.submit(() -> engine.cancel(mc, result)).join();
-                        throw error;
-                    }
-                }
-            }
-            var reply = new JsonObject();
-            reply.addProperty("world", frame.world());
-            reply.addProperty("ticks", frame.ticks());
-            reply.addProperty("pause_reason", frame.pauseReason());
-            if (!frame.listeners().isEmpty()) reply.add("pause_listeners", JSON.toJsonTree(frame.listeners()));
-            if (frame.png() != null) {
-                reply.add("camera", JSON.toJsonTree(frame.camera()));
-                reply.addProperty("png", Base64.getEncoder().encodeToString(frame.png()));
-            }
-            send(peer, reply);
         } catch (Exception e) {
             Throwable cause = e;
             while (cause.getCause() != null) cause = cause.getCause();
             var reply = new JsonObject();
             reply.addProperty("error", cause.toString());
-            send(peer, reply);
+            response = JSON.toJson(reply);
         }
+        send(peer, response);
+    }
+
+    private static Playback.Snapshot handshakeSnapshot() throws Exception {
+        var result = new CompletableFuture<Playback.Snapshot>();
+        PENDING_HANDSHAKE.set(result);
+        try {
+            return result.get(IPC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } catch (TimeoutException pending) {
+            throw new IOException("timed out waiting for the game client handshake");
+        } finally {
+            PENDING_HANDSHAKE.compareAndSet(result, null);
+            result.cancel(false);
+        }
+    }
+
+    // Sample before normal client ticks, or after a transition frame that does not process tasks.
+    public static void sampleHandshake(Minecraft mc) {
+        var result = PENDING_HANDSHAKE.get();
+        if (result == null || !PENDING_HANDSHAKE.compareAndSet(result, null) || result.isDone()) return;
+        try {
+            result.complete(Playback.INSTANCE.snapshot(mc));
+        } catch (RuntimeException failure) {
+            result.completeExceptionally(failure);
+        }
+    }
+
+    private static JsonObject inspectInput(Minecraft mc, Playback engine, JsonObject program) {
+        var state = mc.submit(() -> engine.inspect(mc)).join();
+        var reply = JSON.toJsonTree(state).getAsJsonObject();
+        if (!program.has("queue_version")) {
+            reply.remove("queue_entries");
+            reply.remove("pause_reason");
+        }
+        return reply;
+    }
+
+    private static JsonObject inspectGame(SocketChannel peer, JsonObject request) throws Exception {
+        var option = request.get("include_screenshot");
+        if (option != null && !(option.isJsonPrimitive() && option.getAsJsonPrimitive().isBoolean()))
+            throw new IllegalArgumentException("include_screenshot must be a boolean");
+        var result = GameInspection.request(option != null && option.getAsBoolean());
+        var probe = ByteBuffer.allocate(1);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(IPC_TIMEOUT_SECONDS);
+        try {
+            while (deadline - System.nanoTime() > 0) {
+                try {
+                    var frame = result.get(100, TimeUnit.MILLISECONDS);
+                    var reply = new JsonObject();
+                    reply.add("state", frame.state());
+                    if (frame.png() != null) addImage(reply, frame.png(), frame.camera());
+                    return reply;
+                } catch (TimeoutException pending) {
+                    if (peer.read(probe) != 0) throw new EOFException("client disconnected or sent a second submission");
+                }
+            }
+            throw new IOException("timed out waiting for a rendered game frame");
+        } finally {
+            result.cancel(false);
+        }
+    }
+
+    private static JsonObject play(Minecraft mc, Playback engine, SocketChannel peer,
+                                   Playback.Snapshot snapshot, JsonObject program) throws Exception {
+        var result = mc.submit(() -> engine.start(mc, snapshot, program)).join();
+        var probe = ByteBuffer.allocate(1);
+        Playback.Observation frame;
+        while (true) {
+            try {
+                frame = result.get(100, TimeUnit.MILLISECONDS);
+                break;
+            } catch (TimeoutException pending) {
+                try {
+                    if (peer.read(probe) != 0) throw new EOFException("client disconnected or sent a second submission");
+                } catch (IOException error) {
+                    mc.submit(() -> engine.cancel(mc, result)).join();
+                    throw error;
+                }
+            }
+        }
+        var reply = new JsonObject();
+        reply.addProperty("world", frame.world());
+        reply.addProperty("ticks", frame.ticks());
+        reply.addProperty("pause_reason", frame.pauseReason());
+        if (!frame.listeners().isEmpty()) reply.add("pause_listeners", JSON.toJsonTree(frame.listeners()));
+        if (frame.png() != null) addImage(reply, frame.png(), frame.camera());
+        return reply;
+    }
+
+    private static void addImage(JsonObject reply, byte[] png, FrameCamera.View camera) {
+        if (camera != null) reply.add("camera", JSON.toJsonTree(camera));
+        reply.addProperty("png", Base64.getEncoder().encodeToString(png));
     }
 }

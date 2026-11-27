@@ -1,6 +1,8 @@
 package mcagent.mixin;
 
 import com.mojang.blaze3d.platform.InputConstants;
+import mcagent.GameBridge;
+import mcagent.GameInspection;
 import mcagent.PauseBinding;
 import mcagent.Playback;
 import net.minecraft.client.Minecraft;
@@ -42,8 +44,23 @@ abstract class ClientLoop {
     }
 
     @Inject(method = "runTick", at = @At(value = "INVOKE",
+        target = "Lnet/minecraft/client/Minecraft;runAllTasks()V", shift = At.Shift.AFTER))
+    private void sampleHandshake(boolean tick, CallbackInfo ci) {
+        GameBridge.sampleHandshake((Minecraft)(Object)this);
+    }
+
+    @Inject(method = "runTick", at = @At(value = "INVOKE",
         target = "Lnet/minecraft/client/Minecraft;renderFrame(Z)V", shift = At.Shift.AFTER))
     private void afterRender(boolean render, CallbackInfo ci) {
         Playback.INSTANCE.afterRender((Minecraft)(Object)this);
+    }
+
+    // This runs only when the renderer drew a frame, before Minecraft submits the GPU commands.
+    @Inject(method = "renderFrame", at = @At(value = "INVOKE",
+        target = "Lnet/minecraft/client/renderer/GameRenderer;render()V", shift = At.Shift.AFTER))
+    private void inspectRenderedFrame(boolean tick, CallbackInfo ci) {
+        var mc = (Minecraft)(Object)this;
+        GameInspection.afterRender(mc);
+        if (!tick) GameBridge.sampleHandshake(mc);
     }
 }

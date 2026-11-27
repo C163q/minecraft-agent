@@ -75,7 +75,7 @@ public final class Playback {
         }
     }
 
-    private static boolean supports(Minecraft mc) {
+    static boolean supports(Minecraft mc) {
         return mc.level == null || (mc.hasSingleplayerServer() && !mc.getSingleplayerServer().isPublished());
     }
 
@@ -123,7 +123,7 @@ public final class Playback {
         return request.result;
     }
 
-    private String worldState(Minecraft mc) {
+    String worldState(Minecraft mc) {
         if (mc.level == null || mc.gui.isPausing()) return "not_needed";
         if (level == mc.level && freeze && mc.isPaused()) return "paused";
         return mc.isPaused() ? "not_needed" : "unpaused";
