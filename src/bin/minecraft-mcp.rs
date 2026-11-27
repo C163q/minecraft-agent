@@ -1,4 +1,6 @@
-//! Local stdio MCP adapter. Each submission gets a fresh, serialized game session snapshot.
+//! Local stdio MCP adapter for game input, state and screenshots.
+#[path = "minecraft-mcp/game_state.rs"]
+mod game_state;
 #[path = "minecraft-mcp/hints.rs"]
 mod hints;
 #[path = "minecraft-mcp/queue.rs"]
@@ -20,7 +22,7 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-fn receive(reader: &mut BufReader<UnixStream>) -> Result<Value> {
+fn receive(reader: &mut impl BufRead) -> Result<Value> {
     let mut line = String::new();
     if reader.read_line(&mut line)? == 0 {
         return Err("game disconnected; check game state before submitting again".into());
@@ -130,11 +132,11 @@ fn connect_game(call: &Mutex<Call>) -> Result<(BufReader<UnixStream>, Value)> {
 }
 
 fn inspect(args: Option<&Value>, call: &Mutex<Call>) -> Result<Value> {
-    let state = queue::inspect(args, || inspect_game(call))?;
+    let state = queue::inspect(args, || input_snapshot(call))?;
     Ok(json!({"structuredContent":state,"content":[{"type":"text","text":state.to_string()}]}))
 }
 
-fn inspect_game(call: &Mutex<Call>) -> Result<Value> {
+fn input_snapshot(call: &Mutex<Call>) -> Result<Value> {
     let (mut reader, hello) = connect_game(call)?;
     if hello["inspect_input"] != true {
         return Err(
@@ -274,12 +276,8 @@ fn stop_result(reply: &Value, include_screenshot: bool) -> Result<Value> {
         return Ok(json!({"content":[{"type":"text","text":status.to_string()}]}));
     }
     let data = reply["png"].as_str().ok_or("missing stop image")?;
-    let (screenshot_id, width, height) = hints::remember(reply)?;
-    status["screenshot_id"] = json!(screenshot_id);
-    status["width"] = json!(width);
-    status["height"] = json!(height);
-    Ok(json!({"content":[{"type":"text","text":status.to_string()},
-                         {"type":"image","mimeType":"image/png","data":data}]}))
+    let image = hints::image_content(data, &reply["camera"], &mut status)?;
+    Ok(json!({"content":[{"type":"text","text":status.to_string()},image]}))
 }
 
 fn respond(request: &Value) -> Value {
@@ -288,7 +286,7 @@ fn respond(request: &Value) -> Value {
             json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"minecraft-agent","version":env!("CARGO_PKG_VERSION")}})
         }
         Some("tools/list") => {
-            json!({"tools":[{"name":"input_script","description":"Run a keyboard and mouse input script from exactly one of script or path and return its stop status at PAUSE, a pause shortcut, or END. See docs/input-script/README.md.","inputSchema":{"type":"object","properties":{"script":{"type":"string"},"path":{"type":"string"},"include_screenshot":{"type":"boolean","default":true,"description":"Include the stopped frame as a PNG image."}},"additionalProperties":false}},queue::tool(),hints::tool()]})
+            json!({"tools":[{"name":"input_script","description":"Run a keyboard and mouse input script from exactly one of script or path and return its stop status at PAUSE, a pause shortcut, or END. See docs/input-script/README.md.","inputSchema":{"type":"object","properties":{"script":{"type":"string"},"path":{"type":"string"},"include_screenshot":{"type":"boolean","default":true,"description":"Include the stopped frame as a PNG image."}},"additionalProperties":false}},queue::tool(),hints::tool(),game_state::tool()]})
         }
         Some("ping") => json!({}),
         method => {
@@ -333,7 +331,10 @@ fn main() -> io::Result<()> {
         };
         let tool = request["params"]["name"].as_str();
         if method != Some("tools/call")
-            || !matches!(tool, Some("input_script" | "cursor_hint" | "inspect_input"))
+            || !matches!(
+                tool,
+                Some("input_script" | "cursor_hint" | "inspect_input" | "inspect_game")
+            )
         {
             send(&respond(&request))?;
             continue;
@@ -351,11 +352,12 @@ fn main() -> io::Result<()> {
         }
         let slot = Arc::clone(&pending);
         thread::spawn(move || {
-            let args = &request["params"]["arguments"];
+            let args = request["params"].get("arguments");
             let result = match request["params"]["name"].as_str() {
-                Some("inspect_input") => inspect(request["params"].get("arguments"), &call),
-                Some("cursor_hint") => hints::annotate(args),
-                _ => play(args, &call),
+                Some("inspect_input") => inspect(args, &call),
+                Some("inspect_game") => game_state::inspect(args, || connect_game(&call)),
+                Some("cursor_hint") => hints::annotate(args.unwrap_or(&Value::Null)),
+                _ => play(args.unwrap_or(&Value::Null), &call),
             }
             .unwrap_or_else(
                 |e| json!({"isError":true,"content":[{"type":"text","text":e.to_string()}]}),
@@ -374,6 +376,24 @@ fn main() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lists_inspect_game_as_a_read_only_tool_with_optional_screenshot() {
+        let response = respond(&json!({"id":1,"method":"tools/list"}));
+        let tool = response["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "inspect_game")
+            .expect("tools/list must include inspect_game");
+        assert_eq!(tool["annotations"]["readOnlyHint"], true);
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        let properties = tool["inputSchema"]["properties"].as_object().unwrap();
+        assert_eq!(properties.len(), 1);
+        assert_eq!(properties["include_screenshot"]["type"], "boolean");
+        assert_eq!(properties["include_screenshot"]["default"], false);
+        assert!(tool["inputSchema"].get("required").is_none());
+    }
 
     #[test]
     fn imported_demo_keys_are_validated_without_dispatching_its_entry() {

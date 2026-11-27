@@ -38,11 +38,10 @@ static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| {
     })
 });
 
-pub fn remember(reply: &Value) -> Result<(String, u32, u32)> {
-    let data = reply["png"].as_str().ok_or("missing END image")?;
+fn remember(data: &str, camera: &Value) -> Result<(String, u32, u32)> {
     let frame = Frame {
         png: base64_simd::STANDARD.decode_to_vec(data)?,
-        camera: reply["camera"].clone(),
+        camera: camera.clone(),
     };
     let (width, height) =
         ImageReader::with_format(Cursor::new(&frame.png), ImageFormat::Png).into_dimensions()?;
@@ -60,6 +59,14 @@ pub fn remember(reply: &Value) -> Result<(String, u32, u32)> {
     Ok((id, width, height))
 }
 
+pub fn image_content(data: &str, camera: &Value, status: &mut Value) -> Result<Value> {
+    let (id, width, height) = remember(data, camera)?;
+    status["screenshot_id"] = json!(id);
+    status["width"] = json!(width);
+    status["height"] = json!(height);
+    Ok(json!({"type":"image","mimeType":"image/png","data":data}))
+}
+
 pub fn tool() -> Value {
     let coordinate = json!({"type":["integer","string"],
         "description":"Integer PNG pixel or percentage string from the left or top, e.g. 25%"});
@@ -69,7 +76,7 @@ pub fn tool() -> Value {
         "inputSchema":{
             "type":"object",
             "properties":{
-                "screenshot_id":{"type":"string","description":"ID from input_script"},
+                "screenshot_id":{"type":"string","description":"ID from input_script or inspect_game"},
                 "path":{"type":"string","description":"Path to a PNG on the MCP host"},
                 "x":coordinate, "y":coordinate,
                 "include_rotation":{"type":"boolean","default":true}
@@ -202,11 +209,11 @@ mod tests {
 
     #[test]
     fn historical_frame_percent_hint_keeps_picture_and_camera_together() {
-        let (id, width, height) = remember(&small_frame()).unwrap();
+        let frame = small_frame();
+        let png = frame["png"].as_str().unwrap();
+        let (id, width, height) = remember(png, &frame["camera"]).unwrap();
         assert_eq!((width, height), (64, 48));
-        let mut second = small_frame();
-        second["camera"] = Value::Null;
-        let (gui_id, _, _) = remember(&second).unwrap();
+        let (gui_id, _, _) = remember(png, &Value::Null).unwrap();
         let reply = annotate(&json!({"screenshot_id":id,"x":"75%","y":"50%"})).unwrap();
         let status: Value =
             serde_json::from_str(reply["content"][0]["text"].as_str().unwrap()).unwrap();
