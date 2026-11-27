@@ -614,7 +614,110 @@ public final class InputQueueTest {
         }
     }
 
+    void recordsOneNotificationInObservationOrder() {
+        String second = control(17, "\"event\":\"BlockInteracted\",\"body\":[" + ACTION + "]");
+        long block = program(definition("watch", second, listener("Hurt", ACTION), ACTION),
+            listener("BlockInteracted", ACTION), call(4, "watch"));
+        var journal = new EventJournal();
+        var fields = JsonParser.parseString("{\"item\":null,\"before\":{\"open\":false}}").getAsJsonObject();
+        equal(0L, queue.observe("BlockInteracted", fields, journal));
+        equal(null, controls());
+        queue.observe("Hurt", null, journal);
+        equal(true, queue.observe("BlockInteracted", fields, journal) > 0);
+        equal(0L, queue.observe("BlockInteracted", fields, journal));
+        fields.getAsJsonObject("before").addProperty("open", true);
+        tick("s");
+        equal("end", controls());
+
+        var frame = new Playback.Observation(1, "paused", "end", List.of(), journal.seal(), null, null);
+        var reply = JsonParser.parseString(GameBridge.playReply(frame)).getAsJsonObject();
+        var events = reply.getAsJsonArray("events");
+        equal(2, events.size());
+        equal("Hurt", events.get(0).getAsJsonObject().get("event").getAsString());
+        var interaction = events.get(1).getAsJsonObject();
+        equal("BlockInteracted", interaction.get("event").getAsString());
+        equal(true, interaction.get("item").isJsonNull());
+        equal(false, interaction.getAsJsonObject("before").get("open").getAsBoolean());
+        var listeners = interaction.getAsJsonArray("listeners");
+        equal(JsonParser.parseString("""
+            [{"event":"BlockInteracted","block":%d,"line":9},
+             {"event":"BlockInteracted","block":%d,"line":17,"call_stack":[{"id":1,"name":"watch","line":4}]}]
+            """.formatted(block, block)), listeners);
+        equal(false, reply.has("pause_listeners"));
+        equal(false, reply.has("events_omitted"));
+    }
+
+    void sealsAtTheStopFrameWhileRetainingListeners() {
+        long owner = program("", listener("ScreenOpened", PAUSE, ACTION), listener("Hurt", ACTION),
+            PAUSE, ACTION, ACTION);
+        equal("pause", controls());
+        var firstWindow = new EventJournal();
+        queue.observe("ScreenOpened", null, firstWindow);
+        equal("pause", controls());
+        queue.observe("Hurt", null, firstWindow); // Confirmed between the pause boundary and its frame.
+        var stopped = firstWindow.seal();
+        equal(List.of("ScreenOpened", "Hurt"), stopped.entries().stream().map(EventJournal.Entry::event).toList());
+        equal(owner, stopped.entries().getFirst().listeners().getFirst().block());
+        tick("s");
+        equal("end", controls());
+
+        // A delivery after the cutoff still dispatches its listener.
+        equal(true, queue.observe("ScreenOpened", null, firstWindow) > 0);
+        equal("pause", controls());
+        equal(2, firstWindow.seal().entries().size());
+
+        submit("Wait 4");
+        var frame = new Playback.Observation(4, "paused", "end", List.of(), new EventJournal().seal(), null, null);
+        var reply = JsonParser.parseString(GameBridge.playReply(frame)).getAsJsonObject();
+        equal(new JsonArray(), reply.getAsJsonArray("events"));
+    }
+
+    void reportsListenersFromAnOlderSubmissionInTheNewWindow() {
+        long older = program("", listener("DamageBlocked", PAUSE, ACTION), PAUSE, ACTION);
+        equal("pause", controls());
+        submit("Wait 3");
+        var journal = new EventJournal();
+        queue.observe("DamageBlocked", null, journal);
+        equal("pause", controls());
+        equal(older, journal.seal().entries().getFirst().listeners().getFirst().block());
+    }
+
+    void keepsAcceptedNotificationAfterHandlerReturns() {
+        long block = program(definition("watch", listener("LeftGround", returned(10)), ACTION),
+            call(2, "watch"));
+        var journal = new EventJournal();
+        equal(null, controls());
+        queue.observe("LeftGround", null, journal);
+        equal("end", controls());
+        equal(List.of(), queue.pauseListeners());
+        equal(block, journal.seal().entries().getFirst().listeners().getFirst().block());
+    }
+
+    void evictsOnlyOldEntriesWhenTheJournalIsFull() {
+        program("", listener("BlockBroken", ACTION), "{\"line\":12,\"ticks\":\"36\",\"held\":[]}");
+        var journal = new EventJournal();
+        for (int i = 0; i < 36; i++) {
+            equal(null, controls());
+            var fields = new JsonObject();
+            fields.addProperty("x", i);
+            equal(true, queue.observe("BlockBroken", fields, journal) > 0);
+            tick("s");
+            equal("end", controls());
+        }
+        var frame = new Playback.Observation(36, "paused", "end", List.of(), journal.seal(), null, null);
+        var reply = JsonParser.parseString(GameBridge.playReply(frame)).getAsJsonObject();
+        equal(4, reply.get("events_omitted").getAsInt());
+        var events = reply.getAsJsonArray("events");
+        equal(32, events.size());
+        for (int i = 0; i < 32; i++) equal(i + 4, events.get(i).getAsJsonObject().get("x").getAsInt());
+    }
+
     public static void main(String[] args) {
+        new InputQueueTest().recordsOneNotificationInObservationOrder();
+        new InputQueueTest().sealsAtTheStopFrameWhileRetainingListeners();
+        new InputQueueTest().reportsListenersFromAnOlderSubmissionInTheNewWindow();
+        new InputQueueTest().keepsAcceptedNotificationAfterHandlerReturns();
+        new InputQueueTest().evictsOnlyOldEntriesWhenTheJournalIsFull();
         new InputQueueTest().olderClearFinishesAfterItsHandler(false);
         new InputQueueTest().olderClearFinishesAfterItsHandler(true);
         new InputQueueTest().anotherClearTakesOverCompletion();

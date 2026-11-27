@@ -53,7 +53,7 @@ public final class Playback {
 
     record Snapshot(ClientLevel level, Set<String> persistent) {}
     record Observation(long ticks, String world, String pauseReason, List<InputQueue.Origin> listeners,
-                       byte[] png, FrameCamera.View camera) {}
+                       EventJournal.Report events, byte[] png, FrameCamera.View camera) {}
     record Held(Map<String,String> keys, Map<String,String> buttons) {}
     record InputState(String world, Held held, List<Movement.Pending<?>> moves, double max_speed_px_per_tick,
                       String pause_reason, String last_error, List<InputQueue.ActiveCall> active_calls,
@@ -63,6 +63,7 @@ public final class Playback {
     private record Fence(IntegratedServer server, int id) {}
     private static final class Request {
         final CompletableFuture<Observation> result = new CompletableFuture<>();
+        final EventJournal events = new EventJournal();
         final boolean includeScreenshot;
         long executed;
         long deathObservation;
@@ -130,6 +131,10 @@ public final class Playback {
     }
 
     public boolean frozen() { return freeze; }
+    public boolean worldActionsPaused(Minecraft mc) {
+        // After resume(), vanilla's pause flag can survive until the next frame.
+        return mc.level != null && (freeze || (running && mc.isPaused() && !mc.gui.isPausing()));
+    }
     public boolean showPauseIndicator(Minecraft mc) {
         return pauseConfirmed && freeze && level == mc.level && mc.isPaused() && !mc.gui.isPausing();
     }
@@ -201,8 +206,13 @@ public final class Playback {
     }
 
     public long observe(Minecraft mc, String event) {
-        if (mc.level == null || mc.level != level || !supports(mc)) return 0;
-        long observation = queue.observe(event);
+        return observe(mc, event, null);
+    }
+
+    /** Called on the client thread after an event is observed locally or confirmed by the server. */
+    public long observe(Minecraft mc, String event, JsonObject fields) {
+        if (mc.level != level || (mc.level == null && !event.equals("ScreenOpened")) || !supports(mc)) return 0;
+        long observation = queue.observe(event, fields, active == null ? null : active.events);
         if (active != null && event.equals("Death") && queue.foregroundObserved(observation))
             active.deathObservation = observation;
         return observation;
@@ -337,9 +347,11 @@ public final class Playback {
         String world = worldState(mc);
         String reason = pauseReason;
         boolean intermediate = "capture".equals(reason);
+        // Close the window at the stop frame before starting any readback and encoding.
+        var events = r != null && !intermediate ? r.events.seal() : null;
         boolean returnImage = r != null && r.includeScreenshot && !intermediate && lastError == null;
         if (!returnImage && screenshotPaths.isEmpty()) {
-            completeStop(mc, r, world, reason, null, null);
+            completeStop(mc, r, world, reason, events, null, null);
             return;
         }
         final long generation = captureGeneration;
@@ -365,7 +377,7 @@ public final class Playback {
                             stop(mc, "hotkey");
                         }
                         else resume(mc);
-                    } else completeStop(mc, r, world, reason, returnImage ? png : null, camera);
+                    } else completeStop(mc, r, world, reason, events, returnImage ? png : null, camera);
                 }));
             });
         } catch (RuntimeException error) {
@@ -390,12 +402,13 @@ public final class Playback {
         if (endInNativeMenu && mc.gui.isPausing()) freeze = false;
     }
 
-    private void completeStop(Minecraft mc, Request r, String world, String reason, byte[] png, FrameCamera.View camera) {
+    private void completeStop(Minecraft mc, Request r, String world, String reason, EventJournal.Report events,
+                              byte[] png, FrameCamera.View camera) {
         active = null;
         if (endInNativeMenu && world.equals("not_needed") && mc.gui.isPausing()) freeze = false;
         if (r != null) {
             if (lastError != null) r.result.completeExceptionally(new IllegalStateException(lastError));
-            else r.result.complete(new Observation(r.executed, world, reason, pauseListeners, png, camera));
+            else r.result.complete(new Observation(r.executed, world, reason, pauseListeners, events, png, camera));
         }
         if (resumeAfterCapture) resume(mc);
     }

@@ -100,7 +100,7 @@ public final class GameBridge implements ClientModInitializer {
                     default -> throw new IllegalArgumentException("unknown operation");
                 };
             } else {
-                response = JSON.toJson(play(mc, engine, peer, snapshot, program));
+                response = play(mc, engine, peer, snapshot, program);
             }
         } catch (Exception e) {
             Throwable cause = e;
@@ -171,8 +171,8 @@ public final class GameBridge implements ClientModInitializer {
         }
     }
 
-    private static JsonObject play(Minecraft mc, Playback engine, SocketChannel peer,
-                                   Playback.Snapshot snapshot, JsonObject program) throws Exception {
+    private static String play(Minecraft mc, Playback engine, SocketChannel peer,
+                               Playback.Snapshot snapshot, JsonObject program) throws Exception {
         var result = mc.submit(() -> engine.start(mc, snapshot, program)).join();
         var probe = ByteBuffer.allocate(1);
         Playback.Observation frame;
@@ -189,13 +189,27 @@ public final class GameBridge implements ClientModInitializer {
                 }
             }
         }
+        return playReply(frame);
+    }
+
+    static String playReply(Playback.Observation frame) {
         var reply = new JsonObject();
         reply.addProperty("world", frame.world());
         reply.addProperty("ticks", frame.ticks());
         reply.addProperty("pause_reason", frame.pauseReason());
         if (!frame.listeners().isEmpty()) reply.add("pause_listeners", JSON.toJsonTree(frame.listeners()));
+        var events = new JsonArray();
+        for (var event : frame.events().entries()) {
+            var entry = new JsonObject();
+            entry.addProperty("event", event.event());
+            if (event.fields() != null) event.fields().entrySet().forEach(field -> entry.add(field.getKey(), field.getValue()));
+            entry.add("listeners", JSON.toJsonTree(event.listeners()));
+            events.add(entry);
+        }
+        reply.add("events", events);
+        if (frame.events().omitted() > 0) reply.addProperty("events_omitted", frame.events().omitted());
         if (frame.png() != null) addImage(reply, frame.png(), frame.camera());
-        return reply;
+        return reply.toString(); // Preserve explicit JSON nulls in event fields.
     }
 
     private static void addImage(JsonObject reply, byte[] png, FrameCamera.View camera) {

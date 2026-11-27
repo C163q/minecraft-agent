@@ -8,7 +8,8 @@ import java.util.function.BooleanSupplier;
 
 /** A block advances one fixed tick at a time alongside every other retained block. */
 final class InputQueue {
-    static final List<String> EVENT_NAMES = List.of("Hurt", "HpLost", "Death", "CollideX", "CollideZ");
+    static final List<String> EVENT_NAMES = List.of("Hurt", "HpLost", "Death", "CollideX", "CollideZ",
+        "BlockBroken", "LeftGround", "ScreenOpened", "DamageBlocked", "BlockInteracted");
     record Call(long id, String name, int line) {}
     record Origin(String event, long block, int line, List<Call> call_stack) {}
     record ListenerState(String event, long block, int line, String state, List<Call> call_stack) {}
@@ -224,6 +225,11 @@ final class InputQueue {
     // Use the first handler block ID to identify all handlers of one observed notification.
     // Zero denotes a notification for which no listener was eligible.
     long observe(String event) {
+        return observe(event, null, null);
+    }
+
+    long observe(String event, JsonObject fields, EventJournal journal) {
+        var accepted = journal != null && journal.isOpen() ? new ArrayList<Origin>() : null;
         long observation = 0;
         for (var listener : listeners) {
             if (!listener.handling && listener.origin.event.equals(event)) {
@@ -233,8 +239,10 @@ final class InputQueue {
                 if (observation == 0) observation = block.id;
                 block.observation = observation;
                 pending.add(block);
+                if (accepted != null) accepted.add(listener.origin);
             }
         }
+        if (accepted != null && !accepted.isEmpty()) journal.record(event, fields, accepted);
         return observation;
     }
 
