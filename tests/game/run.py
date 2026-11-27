@@ -34,7 +34,7 @@ def has_pause_icon(path):
     return False
 
 
-def exercise(client, work, log, codex_env, wait_ready, transitions_only=False, transition_delays=False, values_only=False):
+def exercise(client, work, log, codex_env, wait_ready, transitions_only=False, transition_delays=False, values_only=False, flow_only=False):
     serial = 0
 
     def submit(method, params):
@@ -112,6 +112,10 @@ def exercise(client, work, log, codex_env, wait_ready, transitions_only=False, t
     (work / "name-done").touch()
     wait_ready("ready")
     assert inspect()["world"] == "unpaused"
+    from control_flow import exercise_flow
+    if flow_only:
+        exercise_flow(work, log, play, rpc, inspect)
+        return
     from values import exercise_values
     if values_only:
         exercise_values(work, log, play, rpc, block, inspect)
@@ -246,6 +250,7 @@ def exercise(client, work, log, codex_env, wait_ready, transitions_only=False, t
     from imports import exercise_imports
     exercise_imports(work, play, rpc, block, inspect)
     exercise_values(work, log, play, rpc, block, inspect)
+    exercise_flow(work, log, play, rpc, inspect)
     exercise_action_events(work, log, play, rpc, block, inspect)
     from events import exercise_events
     exercise_events(work, log, play, rpc, block, inspect, codex_env)
@@ -259,6 +264,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("profile", type=Path)
     suite = parser.add_mutually_exclusive_group()
+    suite.add_argument("--control-flow", action="store_true", help="only verify script branches, loops and scope lifetimes")
     suite.add_argument("--input-values", action="store_true", help="only verify script values across the game and MCP")
     suite.add_argument("--codex", action="store_true", help="also verify the image and aim in a live Codex CLI session")
     suite.add_argument("--world-transitions", action="store_true", help="only verify single-player save transitions")
@@ -311,7 +317,7 @@ def main():
                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
             try:
                 exercise(client, work, log, env if args.codex else None, wait_ready,
-                         transitions_only, args.transition_delays, args.input_values)
+                         transitions_only, args.transition_delays, args.input_values, args.control_flow)
             finally:
                 client.stdin.close()
                 try:

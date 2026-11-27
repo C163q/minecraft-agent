@@ -12,7 +12,7 @@
 
 在仓库根目录运行 `cargo test --offline` 验证语法、逐拍状态与示例。运行 `cargo clippy --offline --all-targets -- -D warnings` 检查代码。
 
-使用变量、运行时表达式、函数或 `RETURN` 的脚本需要游戏端执行。Rust 负责解析、词法绑定和参数个数检查，Mod 在接收前校验常量表达式与物理键名，在实际输入边界处理动态值。运行时求值、等待和出错时停止的例子见[变量、表达式与输出](../input-script/values.md)。对于来源可能包含这些语法的输入，使用 `Keyboard::try_play` 检查是否支持固定拍预览，或调用 `Script::compile` 生成正式派发程序。
+使用控制流、变量、运行时表达式、函数或 `RETURN` 的脚本需要游戏端执行。Rust 负责解析、词法绑定和参数个数检查，Mod 在接收前校验常量表达式与物理键名，在实际输入边界处理动态值。运行时求值、等待和出错时停止的例子见[变量、表达式与输出](../input-script/values.md)。对于来源可能包含这些语法的输入，使用 `Keyboard::try_play` 检查是否支持固定拍预览，或调用 `Script::compile` 生成正式派发程序。
 
 ## 核对游戏接口
 

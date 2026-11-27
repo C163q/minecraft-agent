@@ -60,6 +60,8 @@ printf 'MINECRAFT_AGENT_SOCKET=%s\n' "$socket_path"
 
 脚本可按事件数据和变量计算输入，用 `Print` 返回日志，用顶层 `RETURN` 返回 JSON 值。[变量、表达式与输出](docs/input-script/values.md)
 
+用 `IF / ELIF / ELSE` 选择动作，用 `WHILE` 或 `FOR … IN` 重复输入；循环可以在暂停后继续。[条件、循环与比较](docs/input-script/control-flow.md)
+
 编写脚本时按需查阅[脚本语法参考](docs/input-script/README.md)。手动配置 MCP、调整鼠标限速和实机验证见[开发文档](docs/development/keyboard-bridge.md)。
 
 ## 许可证

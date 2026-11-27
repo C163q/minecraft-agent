@@ -42,4 +42,4 @@
 - [单人存档进出时的输入结果](superpowers/specs/2026-11-27-world-transition-design.md)，[实施与验证](superpowers/plans/2026-11-27-world-transition.md)
 - [input_script 的单次调用拍数上限](superpowers/specs/2026-11-27-input-max-ticks-design.md)，[实施与验证](superpowers/plans/2026-11-27-input-max-ticks.md)
 - [变量、表达式与返回值设计](superpowers/specs/2026-11-27-input-values-design.md)，[实施与验证](superpowers/plans/2026-11-27-input-values.md)
-- [输入脚本的条件与循环设计](superpowers/specs/2026-11-27-input-control-flow-design.md)
+- [输入脚本的条件与循环设计](superpowers/specs/2026-11-27-input-control-flow-design.md)，[实施与验证](superpowers/plans/2026-11-27-input-control-flow.md)
