@@ -1,6 +1,6 @@
 use super::{
-    FunctionControl, ParseError, Row, Script, ScriptSource, block_rows, declaration, expect_begin,
-    function_name, parse_block, parse_error, quoted_path,
+    ParseError, Row, Script, ScriptSource, block_rows, declaration, expect_begin, logical_lines,
+    parse_block, parse_error, quoted_path, signature, validate_block,
 };
 use std::{
     collections::BTreeMap,
@@ -90,6 +90,7 @@ struct Import {
 
 struct Definition {
     line: usize,
+    params: Vec<String>,
     body: Vec<Row>,
 }
 
@@ -115,26 +116,29 @@ impl SourceFile {
         };
         file.parse_body(text, root)
             .map_err(|error| LoadError::syntax(&file.name, error))?;
+        if file.path.is_some() {
+            for row in file
+                .functions
+                .values_mut()
+                .flat_map(|definition| &mut definition.body)
+                .chain(&mut file.entry)
+            {
+                row.file = Some(file.name.clone());
+                if let Some((_, body)) = &mut row.handler {
+                    for row in body {
+                        row.file = Some(file.name.clone());
+                    }
+                }
+            }
+        }
         Ok(file)
     }
 
     fn parse_body(&mut self, text: &str, root: bool) -> Result<(), ParseError> {
         let eof = text.lines().count() + 1;
-        let mut source = text.lines().enumerate().filter_map(|(index, raw)| {
-            let raw = raw.trim();
-            if raw.starts_with("//") {
-                return None;
-            }
-            let code = if raw.starts_with("ScreenShot(") || declaration(raw, "IMPORT").is_some() {
-                raw
-            } else {
-                raw.split_once("//")
-                    .map_or(raw, |(code, _)| code)
-                    .trim_end()
-            };
-            Some((index + 1, code))
-        });
+        let mut source = logical_lines(text);
         while let Some((line, code)) = source.next() {
+            let code = code.as_ref();
             if code.is_empty() {
                 continue;
             }
@@ -151,7 +155,7 @@ impl SourceFile {
                 }
                 let (path, rest) = quoted_path(arguments)
                     .ok_or_else(|| parse_error(line, "IMPORT expects a quoted file path"))?;
-                if !rest.is_empty() && !rest.trim_start().starts_with("//") {
+                if !rest.trim().is_empty() {
                     return Err(parse_error(line, "IMPORT must be on its own line"));
                 }
                 self.imports.push(Import {
@@ -160,17 +164,17 @@ impl SourceFile {
                 });
                 continue;
             }
-            let signature =
+            let arguments =
                 declaration(code, "FUNCTION").ok_or_else(|| parse_error(line, "expected BEGIN"))?;
-            let name =
-                function_name(signature.trim()).map_err(|message| parse_error(line, message))?;
+            let (name, params) =
+                signature(arguments.trim()).map_err(|message| parse_error(line, message))?;
             if let Some(first) = self.functions.get(name) {
                 return Err(duplicate_error(line, name, &self.name, first.line));
             }
             expect_begin(&mut source, eof, "FUNCTION")?;
             let body = parse_block(&mut source, eof, true)?;
             self.functions
-                .insert(name.to_owned(), Definition { line, body });
+                .insert(name.to_owned(), Definition { line, params, body });
         }
         if root {
             return Err(parse_error(eof, "missing BEGIN"));
@@ -286,6 +290,7 @@ pub(super) fn load(source: ScriptSource<'_>, base: &Path) -> Result<Script, Load
 fn assemble(files: Vec<SourceFile>) -> Result<Script, LoadError> {
     let uses_imports = !files[0].imports.is_empty();
     let mut defined = BTreeMap::new();
+    let mut arities = BTreeMap::new();
     for file in &files {
         for (name, definition) in &file.functions {
             if let Some((first_source, first_line)) =
@@ -296,25 +301,31 @@ fn assemble(files: Vec<SourceFile>) -> Result<Script, LoadError> {
                     duplicate_error(definition.line, name, first_source, first_line),
                 ));
             }
+            arities.insert(name.as_str(), definition.params.len());
         }
     }
 
     let mut import_keys = BTreeMap::new();
     for file in &files {
-        let missing = file
-            .rows()
-            .filter_map(|row| match &row.control {
-                Some(FunctionControl::Call(name)) if !defined.contains_key(name.as_str()) => {
-                    Some((row.line, name))
-                }
-                _ => None,
+        let empty = BTreeMap::new();
+        let invalid = file
+            .functions
+            .values()
+            .map(|definition| {
+                let params = definition
+                    .params
+                    .iter()
+                    .map(|name| (name.as_str(), false))
+                    .collect();
+                validate_block(&definition.body, params, &empty, &arities)
             })
-            .min_by_key(|(line, _)| *line);
-        if let Some((line, name)) = missing {
-            return Err(LoadError::syntax(
-                &file.name,
-                parse_error(line, format!("undefined function ${name}")),
-            ));
+            .chain(std::iter::once_with(|| {
+                validate_block(&file.entry, BTreeMap::new(), &empty, &arities)
+            }))
+            .filter_map(Result::err)
+            .min_by_key(|error| error.line);
+        if let Some(error) = invalid {
+            return Err(LoadError::syntax(&file.name, error));
         }
         if uses_imports {
             for row in file.rows() {
@@ -329,15 +340,31 @@ fn assemble(files: Vec<SourceFile>) -> Result<Script, LoadError> {
 
     let mut files = files.into_iter();
     let root = files.next().unwrap();
-    let functions = root
-        .functions
-        .into_iter()
-        .chain(files.flat_map(|file| file.functions))
-        .map(|(name, definition)| (name, definition.body))
-        .collect();
+    let mut functions = BTreeMap::new();
+    let mut params = BTreeMap::new();
+    let mut checks = Vec::new();
+    for (name, definition) in root.functions {
+        functions.insert(name.clone(), definition.body);
+        if !definition.params.is_empty() {
+            params.insert(name, definition.params);
+        }
+    }
+    for file in files {
+        for (name, definition) in file.functions {
+            functions.insert(name.clone(), definition.body);
+            if !definition.params.is_empty() {
+                params.insert(name, definition.params);
+            }
+        }
+        if block_rows(&file.entry).any(Row::uses_values) {
+            checks.push(file.entry);
+        }
+    }
     Ok(Script {
         rows: root.entry,
         functions,
+        params,
+        checks,
         import_keys,
     })
 }

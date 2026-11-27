@@ -6,6 +6,14 @@ import java.util.List;
 /** Unfinished relative moves in the script's pixel coordinates. Client-thread only. */
 final class Movement {
     record Delta(double x, double y) {}
+    static final class AdvanceFailure extends IllegalArgumentException {
+        final int move;
+
+        AdvanceFailure(String message, int move) {
+            super(message);
+            this.move = move;
+        }
+    }
     // The requested speed is a scalar for straight moves, or an (x,y) pair for per-axis moves.
     record Pending<S>(Delta remaining_px, S requested_speed_px_per_tick) {}
 
@@ -26,6 +34,12 @@ final class Movement {
         Axis(double remaining) {
             this.remaining = remaining;
             halfUlp = Math.ulp(remaining) / 2;
+        }
+
+        Axis(Axis source) {
+            remaining = source.remaining;
+            roundoff = source.roundoff;
+            halfUlp = source.halfUlp;
         }
 
         void consume(double step) {
@@ -60,6 +74,14 @@ final class Movement {
             this.straight = straight;
         }
 
+        Move(Move source) {
+            x = new Axis(source.x);
+            y = new Axis(source.y);
+            speedX = source.speedX;
+            speedY = source.speedY;
+            straight = source.straight;
+        }
+
         void requestStep() {
             double remainingX = x.remaining, remainingY = y.remaining;
             if (straight) {
@@ -81,7 +103,14 @@ final class Movement {
     private final ArrayList<Move> active = new ArrayList<>();
 
     boolean pending() { return !active.isEmpty(); }
+    int size() { return active.size(); }
     void clear() { active.clear(); }
+
+    Movement copy() {
+        var result = new Movement();
+        for (var move : active) result.active.add(new Move(move));
+        return result;
+    }
 
     void addStraight(double x, double y, double speed) {
         if (!Double.isFinite(Math.hypot(x, y)) || !Double.isFinite(speed) || speed <= 0)
@@ -104,18 +133,17 @@ final class Movement {
             sumY += move.requestedY;
         }
         double length = Math.hypot(sumX, sumY);
-        if (!Double.isFinite(length)) throw new IllegalArgumentException("combined movement is out of range");
+        if (!Double.isFinite(length)) throw new AdvanceFailure("combined movement is out of range", -1);
         double scale = length <= cap ? 1 : cap / length;
-        var moves = active.iterator();
-        while (moves.hasNext()) {
-            var move = moves.next();
+        for (int index = 0; index < active.size(); index++) {
+            var move = active.get(index);
             double oldX = move.x.remaining, oldY = move.y.remaining;
             move.x.consume(move.requestedX * scale);
             move.y.consume(move.requestedY * scale);
             if (oldX == move.x.remaining && oldY == move.y.remaining)
-                throw new IllegalArgumentException("movement speed is too small for the requested distance");
-            if (move.x.remaining == 0 && move.y.remaining == 0) moves.remove();
+                throw new AdvanceFailure("movement speed is too small for the requested distance", index);
         }
+        active.removeIf(move -> move.x.remaining == 0 && move.y.remaining == 0);
         return new Delta(sumX * scale, sumY * scale);
     }
 }

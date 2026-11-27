@@ -70,22 +70,33 @@ fn program_runs(program: &DispatchProgram) -> impl Iterator<Item = &KeyRun> + Cl
         .runs
         .iter()
         .chain(program.functions.values().flatten())
+        .chain(program.checks.iter().flatten())
         .flat_map(|run| std::iter::once(run).chain(run.handler.iter().flat_map(|(_, body)| body)))
 }
 
 fn check_game_support(program: &DispatchProgram, hello: &Value) -> Result<bool> {
     let runs = program_runs(program);
     let uses_functions = !program.functions.is_empty() || runs.clone().any(|r| r.control.is_some());
+    let uses_values = !program.params.is_empty() || runs.clone().any(|r| r.values.is_some());
+    if uses_values && (hello["input_values"] != true || hello["pause_queue"] != true) {
+        return Err(
+            "input script values require an updated Fabric mod with input_values and pause_queue"
+                .into(),
+        );
+    }
     if uses_functions && (hello["input_functions"] != true || hello["pause_queue"] != true) {
         return Err("FUNCTION and RETURN require an updated Fabric mod with input_functions and pause_queue".into());
     }
     for run in runs {
-        let line = run.line;
+        let location = run.file.as_ref().map_or_else(
+            || format!("line {}", run.line),
+            |file| format!("{file}: line {}", run.line),
+        );
         if (run.handler.is_some() || run.clear_listeners || run.screenshot.is_some())
             && hello["input_events"] != true
         {
             return Err(format!(
-                "line {line}: input events and explicit screenshots require an updated Fabric mod"
+                "{location}: input events and explicit screenshots require an updated Fabric mod"
             )
             .into());
         }
@@ -97,13 +108,27 @@ fn check_game_support(program: &DispatchProgram, hello: &Value) -> Result<bool> 
                 None => matches!(event.as_str(), "Hurt" | "HpLost"),
             };
             if !supported {
-                return Err(format!("line {line}: installed Fabric mod does not support ON({event}); update the mod and restart Minecraft").into());
+                return Err(format!("{location}: installed Fabric mod does not support ON({event}); update the mod and restart Minecraft").into());
             }
         }
-        let needs_mouse =
-            run.wait_mouse || run.clear || !run.moves.is_empty() || !run.buttons.is_empty();
+        let dynamic_mouse = run
+            .values
+            .as_ref()
+            .and_then(|value| value["actions"].as_array())
+            .is_some_and(|actions| {
+                actions.iter().any(|action| {
+                    action[0]
+                        .as_str()
+                        .is_some_and(|name| name.starts_with("Mouse"))
+                })
+            });
+        let needs_mouse = dynamic_mouse
+            || run.wait_mouse
+            || run.clear
+            || !run.moves.is_empty()
+            || !run.buttons.is_empty();
         if needs_mouse && hello["mouse_input"] != true {
-            return Err(format!("line {line}: installed Fabric mod only supports keyboard input; update the mod and restart Minecraft").into());
+            return Err(format!("{location}: installed Fabric mod only supports keyboard input; update the mod and restart Minecraft").into());
         }
     }
     Ok(uses_functions)
@@ -170,6 +195,12 @@ fn encode_runs(runs: Vec<KeyRun>, queue_supported: bool) -> Result<Vec<Value>> {
                 run["key_actions"] = json!(r.key_actions);
                 run["source"] = json!(r.source);
                 run["pause"] = json!(r.pause);
+                if let Some(file) = r.file {
+                    run["file"] = json!(file);
+                }
+            }
+            if let Some(values) = r.values {
+                run["v"] = values;
             }
             if let Some((event, body)) = r.handler {
                 run["event"] = json!(event);
@@ -209,6 +240,17 @@ fn encode_program(program: DispatchProgram, hello: &Value, max_speed: f64) -> Re
             .map(|(name, body)| Ok((name, encode_runs(body, queue_supported)?)))
             .collect::<Result<BTreeMap<_, _>>>()?;
         request["functions"] = json!(functions);
+    }
+    if !program.params.is_empty() {
+        request["params"] = json!(program.params);
+    }
+    if !program.checks.is_empty() {
+        let checks = program
+            .checks
+            .into_iter()
+            .map(|body| encode_runs(body, queue_supported))
+            .collect::<Result<Vec<_>>>()?;
+        request["checks"] = json!(checks);
     }
     Ok(request)
 }
@@ -288,17 +330,40 @@ fn stop_result(reply: &Value, include_screenshot: bool) -> Result<Value> {
         "events_omitted",
         "transition",
         "screen",
+        "stdout",
+        "script_error",
+        "capture_error",
     ] {
         if let Some(value) = reply.get(field) {
             status[field] = value.clone();
         }
     }
-    if !include_screenshot {
-        return Ok(json!({"content":[{"type":"text","text":status.to_string()}]}));
+    let image = if include_screenshot && reply.get("capture_error").is_none() {
+        let data = reply["png"].as_str().ok_or("missing stop image")?;
+        Some(hints::image_content(data, &reply["camera"], &mut status)?)
+    } else {
+        None
+    };
+    let text = if let Some(value) = reply.get("return_value_json") {
+        use serde_json::value::{RawValue, to_raw_value};
+        let value: &RawValue =
+            serde_json::from_str(value.as_str().ok_or("invalid serialized return value")?)?;
+        let mut fields = BTreeMap::new();
+        for (key, field) in status.as_object().expect("stop status is an object") {
+            fields.insert(key.as_str(), to_raw_value(field)?);
+        }
+        fields.insert("return_value", value.to_owned());
+        serde_json::to_string(&fields)?
+    } else {
+        status.to_string()
+    };
+    let mut content = vec![json!({"type":"text","text":text})];
+    content.extend(image);
+    let mut result = json!({"content":content});
+    if reply.get("script_error").is_some() || reply.get("capture_error").is_some() {
+        result["isError"] = json!(true);
     }
-    let data = reply["png"].as_str().ok_or("missing stop image")?;
-    let image = hints::image_content(data, &reply["camera"], &mut status)?;
-    Ok(json!({"content":[{"type":"text","text":status.to_string()},image]}))
+    Ok(result)
 }
 
 fn respond(request: &Value) -> Value {
@@ -475,6 +540,39 @@ mod tests {
         );
         std::fs::remove_file(&library).unwrap();
         std::fs::remove_dir(&temp).unwrap();
+    }
+
+    #[test]
+    fn stopped_script_values_preserve_output_null_and_error_context() {
+        let reply = json!({"world":"paused","ticks":2,"pause_reason":"end","return_value_json":"null","stdout":"A\nB\n"});
+        let result = stop_result(&reply, false).unwrap();
+        let status: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(status.get("return_value"), Some(&Value::Null));
+        assert_eq!(status["stdout"], "A\nB\n");
+
+        let exact = r#"{"$serde_json::private::Number":"ordinary key","n":36893488147419103230}"#;
+        let result = stop_result(
+            &json!({"world":"paused","ticks":0,"return_value_json":exact}),
+            false,
+        )
+        .unwrap();
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(exact)
+        );
+
+        let reply = json!({"world":"paused","ticks":1,"pause_reason":"error","stdout":"A\n",
+                            "script_error":{"block":3,"line":4,"message":"expected a number","call_stack":[]}});
+        let result = stop_result(&reply, false).unwrap();
+        assert_eq!(result["isError"], true);
+        let status: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(status["script_error"], reply["script_error"]);
+        assert_eq!(status["stdout"], "A\n");
+        assert!(status.get("return_value").is_none());
     }
 
     #[test]
@@ -715,5 +813,48 @@ mod tests {
             );
             assert!(error.to_string().contains(missing), "{error}");
         }
+    }
+
+    #[test]
+    fn values_are_encoded_with_parameters_separate_waits_and_input_actions() {
+        let script = Script::parse(concat!(
+            "FUNCTION $prepare($name)\nBEGIN\nRETURN $name\nEND\n",
+            "BEGIN\nLET $key = $prepare(\"w\")\n",
+            "ON(Hurt($event))\nBEGIN\nPrint(\"{{}} {}\", $event.event)\nEND\n",
+            "LET $delay = 3\nWait($delay) Key($key) MouseMove(Px(Min(1, 2)), Px(0))\nEND"
+        ))
+        .unwrap();
+        let old_hello = json!({"pause_queue":true,"input_functions":true,"input_events":true,"mouse_input":true});
+        let error =
+            encode_program(script.compile(Default::default()), &old_hello, 50.).unwrap_err();
+        assert!(error.to_string().contains("input_values"), "{error}");
+        let mut hello = old_hello;
+        hello["input_values"] = json!(true);
+        let request = encode_program(script.compile(Default::default()), &hello, 50.).unwrap();
+        assert_eq!(request["params"], json!({"prepare":["name"]}));
+        assert_eq!(request["runs"][0]["call"], "prepare");
+        assert_eq!(
+            request["runs"][0]["v"],
+            json!({"op":"let","target":["var","key"],"args":[["lit","w"]]})
+        );
+        assert_eq!(request["runs"][1]["v"], json!({"bind":"event"}));
+        assert_eq!(
+            request["runs"][1]["body"][0]["v"],
+            json!({"op":"print","format":"{{}} {}","args":[["field",["var","event"],"event"]]})
+        );
+        assert_eq!(request["runs"][3]["ticks"], "1");
+        assert_eq!(
+            request["runs"][3]["v"],
+            json!({"op":"wait","expr":["var","delay"]})
+        );
+        assert_eq!(
+            request["runs"][4]["v"],
+            json!({"op":"input","actions":[["Key",["var","key"]],["MouseMove",["px",["Min",["num","1"],["num","2"]]],["px",["num","0"]]]]})
+        );
+        assert_eq!(
+            request["functions"]["prepare"][0]["v"],
+            json!({"expr":["var","name"]})
+        );
+        assert_eq!(request["runs"][4]["line"], 12);
     }
 }

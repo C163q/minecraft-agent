@@ -1,5 +1,7 @@
 package mcagent;
 
+import java.util.List;
+
 /** Run with: java -cp <compiled classes> mcagent.MovementTest */
 public class MovementTest {
     static void step(Movement motion, double x, double y) {
@@ -10,7 +12,27 @@ public class MovementTest {
     static void done(Movement motion) {
         if (motion.pending()) throw new AssertionError("unexpected remainder");
     }
+
+    static void failedPreviewKeepsBufferedProgress() {
+        var buffered = new Movement();
+        buffered.addStraight(9, 0, 0.3);
+        for (int i = 0; i < 7; i++) step(buffered, 0.3, 0);
+        List<Movement.Pending<?>> previous = buffered.inspect();
+        var candidate = buffered.copy();
+        candidate.addStraight(9e100, 0, 1);
+        try {
+            candidate.advance(50);
+            throw new AssertionError("expected movement speed to be too small to consume distance");
+        } catch (Movement.AdvanceFailure expected) {
+            if (expected.move != 1) throw new AssertionError("wrong movement blamed", expected);
+        }
+        if (!previous.equals(buffered.inspect())) throw new AssertionError("preview altered buffered movement");
+        for (int i = 0; i < 23; i++) step(buffered, 0.3, 0);
+        done(buffered);
+    }
+
     public static void main(String[] args) {
+        failedPreviewKeepsBufferedProgress();
         var m = new Movement();
         m.addStraight(160, 0, 80);
         step(m, 50, 0); step(m, 50, 0); step(m, 50, 0); step(m, 10, 0); done(m);

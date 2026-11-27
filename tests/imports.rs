@@ -356,6 +356,66 @@ fn a_parse_error_in_an_imported_source_reports_the_file_and_line() {
     assert_eq!(message.matches("line 2:").count(), 1, "{message}");
 }
 
+#[test]
+fn unused_imports_validate_lexical_references_and_arity() {
+    let files = Sources::new();
+    for (contents, line, message) in [
+        (
+            "FUNCTION $unused($argument)\nBEGIN\nRETURN $missing\nEND",
+            3,
+            "$missing",
+        ),
+        ("BEGIN\nLET $item = $outer()\nEND\n", 2, "$outer"),
+        (
+            "BEGIN\nON(Hurt($hit))\nBEGIN\nSET $hit.id = 1\nEND\nEND",
+            4,
+            "read-only",
+        ),
+    ] {
+        files.write("library.input", contents);
+        let error = files.inline("IMPORT \"library.input\"\nFUNCTION $outer($argument)\nBEGIN\nRETURN $argument\nEND\nBEGIN\nEND").unwrap_err();
+        let error = error.to_string();
+        assert!(
+            error.contains(&format!("library.input: line {line}")),
+            "{error}"
+        );
+        assert!(error.contains(message), "{error}");
+    }
+}
+
+#[test]
+fn imported_value_checks_retain_only_validation_and_original_locations() {
+    let files = Sources::new();
+    files.write(
+        "library.input",
+        "FUNCTION $example($key)\nBEGIN\nKey($key)\nEND\nBEGIN\nLET $record = {\n  \"a=b\": 1\n}\nSET $record[\"a=b\"] = 2\nWait(5 / 2)\nEND",
+    );
+    let script = files
+        .inline("IMPORT \"library.input\"\nBEGIN\n$example(\"w\")\nEND")
+        .unwrap();
+    let program = script.compile(Default::default());
+    assert_eq!(program.runs.len(), 1);
+    let library_path = files.0.join("library.input").canonicalize().unwrap();
+    let check = &program.checks[0];
+    assert_eq!(
+        check.iter().map(|run| run.line).collect::<Vec<_>>(),
+        [6, 9, 10]
+    );
+    assert!(
+        check
+            .iter()
+            .all(|run| run.file.as_deref() == library_path.to_str())
+    );
+    assert_eq!(
+        check[1].values.as_ref().unwrap()["target"],
+        serde_json::json!(["index", ["var", "record"], ["lit", "a=b"]])
+    );
+    assert_eq!(
+        check[2].values.as_ref().unwrap()["expr"],
+        serde_json::json!(["/", ["num", "5"], ["num", "2"]])
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn root_and_import_reject_nonregular_files() {

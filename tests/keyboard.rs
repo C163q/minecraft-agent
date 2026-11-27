@@ -309,3 +309,89 @@ fn fallible_fixed_tick_preview_rejects_function_scripts_without_advancing_keyboa
             .is_empty()
     );
 }
+
+#[test]
+fn multiline_value_statements_keep_strings_comments_and_the_first_source_line() {
+    let script = Script::parse(
+        r#"BEGIN
+LET $value = {
+    message: "before // after", // only the suffix is a comment
+
+    numbers: [1,
+        -2]
+}
+ON(Hurt($value))
+BEGIN
+LET $copy = $value
+END
+Key(w)
+END"#,
+    )
+    .unwrap();
+    let program = script.compile(Default::default());
+    assert_eq!(
+        program
+            .runs
+            .iter()
+            .map(|run| (run.line, run.ticks))
+            .collect::<Vec<_>>(),
+        [(2, 0), (8, 0), (12, 1)]
+    );
+    assert!(program.runs[0].source.contains("before // after"));
+    assert!(Keyboard::default().try_play(&script).is_err());
+}
+
+#[test]
+fn listener_names_resolve_at_registration_and_before_inner_declarations() {
+    for (source, line, detail) in [
+        ("BEGIN\nLET $x = $x\nEND", 2, "undeclared variable $x"),
+        (
+            "BEGIN\nLET $x = 1\nLET $x = 2\nEND",
+            3,
+            "duplicate variable declaration $x",
+        ),
+        (
+            "BEGIN\nON(Hurt)\nBEGIN\nSET $x = 2\nEND\nLET $x = 1\nEND",
+            4,
+            "undeclared variable $x",
+        ),
+        (
+            "FUNCTION $f($x)\nBEGIN\nLET $x = 2\nEND\nBEGIN\nEND",
+            3,
+            "duplicate variable declaration $x",
+        ),
+        (
+            "FUNCTION $f\nBEGIN\nRETURN $x\nEND\nBEGIN\nLET $x = 1\nEND",
+            3,
+            "undeclared variable $x",
+        ),
+    ] {
+        let error = Script::parse(source).unwrap_err();
+        assert_eq!(error.line, line, "{error}");
+        assert!(error.message.contains(detail), "{error}");
+    }
+    Script::parse("BEGIN\nLET $x = 1\nON(Hurt)\nBEGIN\nLET $x = $x\nSET $x = 2\nEND\nEND").unwrap();
+}
+
+#[test]
+fn print_checks_literal_format_arity_and_row_boundaries() {
+    for statement in [
+        "Print($format)",
+        "Print(\"{}\")",
+        "Print(\"unused\", 1)",
+        "Print(\"{name}\", 1)",
+        "Print(\"unbalanced }\")",
+        "Print(\"no argument follows\",)",
+        "Print(\"okay\") PAUSE",
+    ] {
+        let error = Script::parse(&format!("BEGIN\n{statement}\nEND")).unwrap_err();
+        assert_eq!(error.line, 2, "{statement}");
+        assert!(error.message.contains("Print"), "{error}");
+    }
+    Script::parse(
+        r#"BEGIN
+Print(") // still the string \"] {{}} {} }}", "x")
+END"#,
+    )
+    .unwrap();
+}

@@ -91,6 +91,7 @@ public final class GameBridge implements ClientModInitializer {
             hello.addProperty("max_ticks", true);
             hello.addProperty("input_events", true);
             hello.addProperty("input_functions", true);
+            hello.addProperty("input_values", true);
             hello.add("event_names", JSON.toJsonTree(InputQueue.EVENT_NAMES));
             hello.add("persistent", JSON.toJsonTree(snapshot.persistent()));
             send(peer, JSON.toJson(hello));
@@ -107,7 +108,8 @@ public final class GameBridge implements ClientModInitializer {
             }
         } catch (Exception e) {
             Throwable cause = e;
-            while (cause.getCause() != null) cause = cause.getCause();
+            while ((cause instanceof ExecutionException || cause instanceof CompletionException) && cause.getCause() != null)
+                cause = cause.getCause();
             var reply = new JsonObject();
             reply.addProperty("error", cause.toString());
             response = JSON.toJson(reply);
@@ -219,6 +221,14 @@ public final class GameBridge implements ClientModInitializer {
         reply.addProperty("world", frame.world());
         reply.addProperty("ticks", frame.ticks());
         reply.addProperty("pause_reason", frame.pauseReason());
+        var output = frame.output();
+        if (output != null) {
+            if (!output.stdout().isEmpty()) reply.addProperty("stdout", output.stdout());
+            // Keep arbitrary object keys and exact numbers intact until the MCP result is serialized.
+            if (output.returnValue() != null) reply.addProperty("return_value_json", output.returnValue().toString());
+            if (output.captureError() != null) reply.addProperty("capture_error", output.captureError());
+            if (output.error() != null) reply.add("script_error", JSON.toJsonTree(output.error()));
+        }
         if (frame.transition() != null) {
             reply.add("transition", JSON.toJsonTree(frame.transition()));
             reply.addProperty("screen", frame.screen());

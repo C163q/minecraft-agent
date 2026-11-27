@@ -753,7 +753,7 @@ public final class InputQueueTest {
         var result = new CompletableFuture<Playback.Observation>();
         var wait = new WorldTransition(7, "enter", result, 0);
         result.complete(new Playback.Observation(1, "paused", "world_changed", List.of(),
-            new EventJournal().seal(), null, null, new Playback.Transition("enter", "completed", true), null));
+            new EventJournal().seal(), null, null, new Playback.Transition("enter", "completed", true), null, null));
         equal(false, wait.deliveryConfirmed());
         equal(false, wait.abandoned());
 
@@ -773,14 +773,325 @@ public final class InputQueueTest {
         equal(false, wait.deliveryConfirmed());
 
         result.complete(new Playback.Observation(1, "paused", "world_changed", List.of(),
-            new EventJournal().seal(), null, null, new Playback.Transition("enter", "completed", true), null));
+            new EventJournal().seal(), null, null, new Playback.Transition("enter", "completed", true), null, null));
         wait.finishDelivery(result, true);
         wait.finishDelivery(result, false);
         equal(true, wait.deliveryConfirmed());
         equal(false, wait.abandoned());
     }
 
+    void pausedAssignmentKeepsTheOriginalIndexAndUpdatesTheCurrentArray() {
+        queue.submit(wire("""
+            {"queue_version":1,"persistent":[],"params":{"f":["arg"]},"functions":{"f":[
+              {"line":20,"ticks":"0","held":[],"pause":true},
+              {"line":21,"ticks":"0","held":[],"return":true,"v":{"expr":["var","arg"]}}
+            ]},"runs":[
+              {"line":2,"ticks":"0","held":[],"v":{"op":"let","target":["var","items"],"expr":["array",["num","0"],["num","0"]]}},
+              {"line":3,"ticks":"0","held":[],"v":{"op":"let","target":["var","i"],"expr":["num","0"]}},
+              {"line":4,"ticks":"0","held":[],"event":"Hurt","v":{"bind":"hit"},"body":[
+                {"line":5,"ticks":"0","held":[],"v":{"op":"set","target":["var","i"],"expr":["num","1"]}},
+                {"line":6,"ticks":"0","held":[],"v":{"op":"set","target":["index",["var","items"],["var","i"]],"expr":["field",["var","hit"],"amount"]}}
+              ]},
+              {"line":8,"ticks":"0","held":[],"call":"f","v":{"op":"set","target":["index",["var","items"],["var","i"]],"args":[["num","7"]]}},
+              {"line":9,"ticks":"0","held":[],"return":true,"v":{"expr":["var","items"]}}
+            ]}
+            """));
+        equal("pause", controls());
+        var fields = new JsonObject();
+        fields.addProperty("amount", 9);
+        queue.observe("Hurt", fields, null);
+        fields.addProperty("amount", 19);
+        equal("end", controls());
+        equal(JsonParser.parseString("[7,9]"), queue.takeReturnValue());
+    }
+
+    void validatesConstantFailuresInImportedEntriesBeforeAcceptance() {
+        submit("Wait 2");
+        var previous = queue.inspect();
+        for (var row : List.of(
+            """
+            {"line":8,"file":"lib.input","ticks":"1","held":[],"v":{"op":"wait","expr":["/",["num","5"],["num","2"]]}}
+            """,
+            """
+            {"line":8,"file":"lib.input","ticks":"1","held":[],"v":{"op":"input","actions":[["Key",["lit","unknown_key"]]]}}
+            """,
+            """
+            {"line":8,"file":"lib.input","ticks":"0","held":[],"v":{"op":"let","target":["var","x"],"expr":["+",["var","y"],["/",["num","1"],["num","0"]]]}}
+            """)) {
+            try {
+                queue.submit(wire("""
+                    {"queue_version":1,"persistent":[],"runs":[],"checks":[[%s]]}
+                    """.formatted(row)));
+                throw new AssertionError("accepted invalid imported entry " + row);
+            } catch (IllegalArgumentException expected) {
+                equal(true, expected.getMessage().contains("lib.input"));
+                equal(previous, queue.inspect());
+            }
+        }
+    }
+
+    void failedInputTickLeavesOtherInputsAndPersistentKeysUntouched() {
+        submit("a=press", "pause", "w=press");
+        tick("a");
+        equal("pause", controls());
+        var older = queue.inspect();
+        long failed = queue.submit(wire("""
+            {"queue_version":1,"persistent":[],"functions":{"f":[
+              {"line":8,"file":"lib.input","ticks":"1","held":[],"v":{"op":"input","actions":[["KeyRelease",["lit","a"]],["KeyPress",["var","name"]],["KeyRelease",["lit","w"]]]}}
+            ]},"params":{"f":["name"]},"runs":[
+              {"line":2,"ticks":"0","held":[],"call":"f","v":{"args":[["lit","w"]]}}
+            ]}
+            """));
+        equal(null, controls());
+        try {
+            queue.input();
+            throw new AssertionError("accepted conflicting dynamic inputs");
+        } catch (InputQueue.ValueFailure expected) {
+            equal(failed, expected.block());
+            equal("lib.input", expected.file());
+            equal(8, expected.line());
+            equal("f", expected.call_stack().getFirst().name());
+            equal(true, expected.getMessage().contains("conflicting"));
+        }
+        equal(Set.of("a"), queue.persistent());
+        equal(older, queue.inspect());
+        tick("w", "a");
+    }
+
+    void invalidDynamicMouseContextLeavesCandidateAndBufferedInputUntouched() {
+        submit("a=press", "pause", "w=press");
+        tick("a");
+        equal("pause", controls());
+        var older = queue.inspect();
+        long failed = queue.submit(wire("""
+            {"queue_version":1,"persistent":[],"runs":[
+              {"line":2,"ticks":"0","held":[],"v":{"op":"let","target":["var","x"],"expr":["num","100"]}},
+              {"line":3,"ticks":"0","held":[],"event":"Hurt","body":[
+                {"line":4,"ticks":"1","held":[],"v":{"op":"input","actions":[["KeyRelease",["lit","a"]],["MouseMoveTo",["px",["var","x"]],["px",["num","0"]]]]}}
+              ]},
+              {"line":5,"ticks":"2","held":[]}
+            ]}
+            """));
+        equal(null, controls());
+        equal(true, queue.observe("Hurt") > failed);
+        equal(null, controls());
+        var mouse = new MouseDispatch(new HeldToggleBindings());
+        var view = new MouseDispatch.Geometry(800, 480, 800, 480, 0, 0, true, false, 1, false, false);
+        try {
+            queue.input(KeyDispatch::resolve, rows -> mouse.prepare(view, true, rows, 50));
+            throw new AssertionError("accepted absolute movement with a grabbed cursor");
+        } catch (InputQueue.ValueFailure expected) {
+            equal(failed, expected.block());
+            equal(4, expected.line());
+            equal(true, expected.getMessage().contains("free cursor"));
+        }
+        equal(Set.of("a"), queue.persistent());
+        equal(older, queue.inspect());
+    }
+
+    void dynamicMousePreflightsConvertedAndCombinedMovement() {
+        var geometry = new MouseDispatch.Geometry(800, 480, 800, 480, 12, 0, false, false, .01, false, false);
+        var mouse = new MouseDispatch(new HeldToggleBindings());
+        var absoluteWithZeroSpeed = """
+            ["MouseMoveTo",["px",["var","x"]],["px",["num","0"]],["px",["num","0"]],["px",["num","0"]]]
+            """;
+        var rotate = """
+            ["MouseMove",["rotate",["var","x"]],["px",["num","0"]]]
+            """;
+        var hugeStep = """
+            ["MouseMove",["px",["var","x"]],["px",["num","0"]],["px",["var","x"]]]
+            """;
+        for (var scenario : List.of(
+            List.of("100", absoluteWithZeroSpeed, "moving axis"),
+            List.of("1e308", rotate, "invalid straight"),
+            List.of("1e308", hugeStep + "," + hugeStep, "combined movement"))) {
+            long block = queue.submit(wire("""
+                {"queue_version":1,"persistent":[],"runs":[
+                  {"line":2,"ticks":"0","held":[],"v":{"op":"let","target":["var","x"],"expr":["num","%s"]}},
+                  {"line":3,"ticks":"1","held":[],"v":{"op":"input","actions":[%s]}}
+                ]}
+                """.formatted(scenario.get(0), scenario.get(1))));
+            equal(null, controls());
+            try {
+                queue.input(KeyDispatch::resolve, rows -> mouse.prepare(geometry, true, rows, 50));
+                throw new AssertionError("expected mouse preflight to fail with " + scenario.get(2));
+            } catch (InputQueue.ValueFailure expected) {
+                equal(block, expected.block());
+                equal(3, expected.line());
+                equal(true, expected.getMessage().contains(scenario.get(2)));
+            }
+            equal(List.of(), mouse.inspectMoves());
+        }
+    }
+
+    void waitUsesTheValueAtTheFirstConsumedTick() {
+        queue.submit(wire("""
+            {"queue_version":1,"persistent":[],"runs":[
+              {"line":2,"ticks":"0","held":[],"v":{"op":"let","target":["var","n"],"expr":["num","2"]}},
+              {"line":3,"ticks":"0","held":[],"event":"Hurt","body":[
+                {"line":4,"ticks":"0","held":[],"pause":true},
+                {"line":5,"ticks":"0","held":[],"v":{"op":"set","target":["var","n"],"expr":["num","4"]}},
+                {"line":6,"ticks":"1","held":[]}
+              ]},
+              {"line":7,"ticks":"0","held":[],"event":"HpLost","body":[
+                {"line":8,"ticks":"0","held":[],"v":{"op":"set","target":["var","n"],"expr":["num","1"]}},
+                {"line":9,"ticks":"1","held":[]}
+              ]},
+              {"line":10,"ticks":"1","held":[],"v":{"op":"wait","expr":["var","n"]}},
+              {"line":11,"ticks":"1","held":[],"key_actions":{"w":"temporary"}}
+            ]}
+            """, "w"));
+        equal(null, controls());
+        queue.observe("Hurt");
+        equal("pause", controls());
+        equal(null, queue.inspect().getFirst().remaining_ticks());
+        tick();
+        equal("3", queue.inspect().getFirst().remaining_ticks());
+        queue.observe("HpLost");
+        equal("end", controls()); // The first listener naturally finished at the last tick.
+        tick();
+        equal("2", queue.inspect().getFirst().remaining_ticks());
+        equal("end", controls()); // The second listener finishes without shortening the wait.
+        tick();
+        tick();
+        tick("w");
+        equal("end", controls());
+    }
+
+    void listenerReturnCancelsLaterHandlersAndDeliversOnlyItsOwnersResult() {
+        queue.submit(wire("""
+            {"queue_version":1,"persistent":[],"functions":{
+              "helper":[{"line":20,"ticks":"0","held":[],"return":true,"v":{"expr":["lit",null]}}],
+              "watch":[
+                {"line":2,"ticks":"0","held":[],"event":"Hurt","body":[
+                  {"line":3,"ticks":"0","held":[],"call":"helper","v":{"op":"let","target":["var","val"]}},
+                  {"line":4,"ticks":"0","held":[],"return":true,"v":{"expr":["var","val"]}}
+                ]},
+                {"line":5,"ticks":"0","held":[],"event":"Hurt","body":[
+                  {"line":6,"ticks":"0","held":[],"v":{"op":"print","format":"skipped"}}
+                ]},
+                {"line":7,"ticks":"1","held":[]}
+              ]},
+              "runs":[
+                {"line":8,"ticks":"0","held":[],"call":"watch","v":{"op":"let","target":["var","ret"]}},
+                {"line":9,"ticks":"0","held":[],"v":{"op":"print","format":"got {}","args":[["var","ret"]]}},
+                {"line":10,"ticks":"0","held":[],"return":true,"v":{"expr":["var","ret"]}}
+            ]}
+            """));
+        equal(null, controls());
+        queue.observe("Hurt");
+        var log = new StringBuilder();
+        equal("end", queue.controls(() -> false, () -> {}, log::append));
+        equal("got null\n", log.toString());
+        equal(JsonParser.parseString("null"), queue.takeReturnValue());
+
+        queue.submit(wire("""
+            {"queue_version":1,"persistent":[],"runs":[
+              {"line":2,"ticks":"0","held":[],"pause":true},
+              {"line":3,"ticks":"0","held":[],"return":true,"v":{"expr":["num","1"]}}
+            ]}
+            """));
+        equal("pause", controls());
+        submit("Wait 1");
+        tick();
+        equal("end", controls());
+        equal(null, queue.takeReturnValue());
+    }
+
+    void reportsFailedWriteBackAtTheSuspendedAssignment() {
+        submit("Wait 4");
+        long failed = queue.submit(wire("""
+            {"queue_version":1,"persistent":[],"functions":{"f":[
+              {"line":20,"ticks":"0","held":[],"pause":true},
+              {"line":21,"ticks":"0","held":[],"return":true,"v":{"expr":["num","0"]}}
+            ]},"runs":[
+              {"line":2,"ticks":"0","held":[],"v":{"op":"let","target":["var","items"],"expr":["array",["num","1"]]}},
+              {"line":3,"ticks":"0","held":[],"event":"Hurt","body":[
+                {"line":4,"ticks":"0","held":[],"v":{"op":"set","target":["var","items"],"expr":["array"]}},
+                {"line":5,"ticks":"0","held":[],"v":{"op":"print","format":"cleared"}}
+              ]},
+              {"line":6,"ticks":"0","held":[],"call":"f","v":{"op":"set","target":["index",["var","items"],["num","0"]]}},
+              {"line":7,"ticks":"0","held":[],"v":{"op":"print","format":"skipped"}}
+            ]}
+            """));
+        equal("pause", controls());
+        queue.observe("Hurt");
+        var log = new StringBuilder();
+        try {
+            queue.controls(() -> false, () -> {}, log::append);
+            throw new AssertionError("wrote into the old array after the listener cleared it");
+        } catch (InputQueue.ValueFailure expected) {
+            equal(failed, expected.block());
+            equal(6, expected.line());
+            equal(List.of(), expected.call_stack());
+            equal(true, expected.getMessage().contains("out of bounds"));
+        }
+        equal("cleared\n", log.toString());
+        equal(List.of(), queue.listeners());
+        equal("4", queue.inspect().getFirst().remaining_ticks());
+        equal(1, queue.inspect().size());
+    }
+
+    void listenerContinuesWithItsCapturedValuesAfterNaturalEntryEnd() {
+        queue.submit(wire("""
+            {"queue_version":1,"persistent":[],"runs":[
+              {"line":2,"ticks":"0","held":[],"v":{"op":"let","target":["var","name"],"expr":["lit","kept"]}},
+              {"line":3,"ticks":"0","held":[],"event":"Hurt","v":{"bind":"hit"},"body":[
+                {"line":4,"ticks":"1","held":[],"v":{"op":"input","actions":[["Key",["field",["var","hit"],"key"]]]}},
+                {"line":5,"ticks":"0","held":[],"v":{"op":"print","format":"{} {}","args":[["var","name"],["field",["var","hit"],"event"]]}}
+              ]},
+              {"line":6,"ticks":"1","held":[]}
+            ]}
+            """));
+        equal(null, controls());
+        equal(Set.of(), queue.input().held());
+        var fields = new JsonObject();
+        fields.addProperty("key", "s");
+        queue.observe("Hurt", fields, null);
+        fields.addProperty("key", "w");
+        queue.advance();
+        equal("end", controls());
+        equal(null, queue.takeReturnValue());
+        tick("s");
+        var log = new StringBuilder();
+        equal("end", queue.controls(() -> false, () -> {}, log::append));
+        equal("kept Hurt\n", log.toString());
+    }
+
+    void olderErrorKeepsTheCurrentSubmissionsReturnValue() {
+        long older = queue.submit(wire("""
+            {"queue_version":1,"persistent":[],"runs":[
+              {"line":2,"ticks":"0","held":[],"v":{"op":"let","target":["var","n"],"expr":["lit","bad"]}},
+              {"line":3,"ticks":"0","held":[],"pause":true},
+              {"line":4,"ticks":"0","held":[],"return":true,"v":{"expr":["+",["var","n"],["num","1"]]}}
+            ]}
+            """));
+        equal("pause", controls());
+        queue.submit(wire("""
+            {"queue_version":1,"persistent":[],"runs":[
+              {"line":2,"ticks":"0","held":[],"return":true,"v":{"expr":["num","5"]}}
+            ]}
+            """));
+        try {
+            controls();
+            throw new AssertionError("the older submission should have reported its invalid return expression");
+        } catch (InputQueue.ValueFailure expected) {
+            equal(older, expected.block());
+        }
+        equal(JsonParser.parseString("5"), queue.takeReturnValue());
+    }
+
     public static void main(String[] args) {
+        new InputQueueTest().pausedAssignmentKeepsTheOriginalIndexAndUpdatesTheCurrentArray();
+        new InputQueueTest().validatesConstantFailuresInImportedEntriesBeforeAcceptance();
+        new InputQueueTest().failedInputTickLeavesOtherInputsAndPersistentKeysUntouched();
+        new InputQueueTest().invalidDynamicMouseContextLeavesCandidateAndBufferedInputUntouched();
+        new InputQueueTest().dynamicMousePreflightsConvertedAndCombinedMovement();
+        new InputQueueTest().waitUsesTheValueAtTheFirstConsumedTick();
+        new InputQueueTest().listenerReturnCancelsLaterHandlersAndDeliversOnlyItsOwnersResult();
+        new InputQueueTest().reportsFailedWriteBackAtTheSuspendedAssignment();
+        new InputQueueTest().listenerContinuesWithItsCapturedValuesAfterNaturalEntryEnd();
+        new InputQueueTest().olderErrorKeepsTheCurrentSubmissionsReturnValue();
         new InputQueueTest().worldTransitionWaitsForReadyDestination();
         new InputQueueTest().worldTransitionAcceptsOnlyLiveOwnerSignals();
         new InputQueueTest().worldTransitionBoundsMissingReadbackForItsOwnPeer();

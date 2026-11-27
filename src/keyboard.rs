@@ -21,13 +21,13 @@ pub struct Keyboard {
     held: BTreeSet<String>,
 }
 
-/// The fixed-tick keyboard preview cannot evaluate function control.
+/// The fixed-tick keyboard preview cannot evaluate functions or values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PreviewError;
 
 impl fmt::Display for PreviewError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a script with FUNCTION or RETURN requires game playback")
+        f.write_str("a script with function control or values requires game playback")
     }
 }
 
@@ -40,7 +40,7 @@ impl Keyboard {
     ///
     /// # Panics
     ///
-    /// Panics when the script defines functions or contains `RETURN`. Use
+    /// Panics when the script uses functions or values. Use
     /// [`Keyboard::try_play`] to handle unsupported scripts as an error.
     #[track_caller]
     pub fn play<'a>(&'a mut self, script: &'a Script) -> impl Iterator<Item = KeyFrame> + 'a {
@@ -53,7 +53,7 @@ impl Keyboard {
         &'a mut self,
         script: &'a Script,
     ) -> Result<impl Iterator<Item = KeyFrame> + 'a, PreviewError> {
-        if script.uses_functions() {
+        if script.uses_functions() || script.uses_values() {
             return Err(PreviewError);
         }
         Ok(script
@@ -116,12 +116,20 @@ pub struct KeyRun {
     /// Full key state for legacy playback. The game queue applies `key_actions`.
     pub held: BTreeSet<String>,
     pub control: Option<FunctionControl>,
+    /// Absolute source file path when the script was loaded from disk.
+    pub file: Option<String>,
+    /// Value operation and its expression trees for game-side evaluation.
+    pub values: Option<serde_json::Value>,
 }
 
 pub struct DispatchProgram {
     pub runs: Vec<KeyRun>,
     /// Function names without the leading `$`, mapped to their compiled bodies.
     pub functions: BTreeMap<String, Vec<KeyRun>>,
+    /// Positional parameter names, keyed by function name.
+    pub params: BTreeMap<String, Vec<String>>,
+    /// Imported entry blocks sent for validation only.
+    pub checks: Vec<Vec<KeyRun>>,
     /// Final key state for legacy playback. The game queue tracks held keys at runtime.
     pub persistent: BTreeSet<String>,
     /// Includes release-only names, so all bindings can be validated before playback.
@@ -167,6 +175,11 @@ impl Script {
                 )
             })
             .collect();
+        let checks = self
+            .checks
+            .iter()
+            .map(|rows| compile_block(rows, &mut Keyboard::default(), &mut keys))
+            .collect();
         // Imported entry blocks are checked even though their runs are never dispatched.
         for (key, (_, line)) in &self.import_keys {
             keys.insert(key.clone(), *line);
@@ -174,6 +187,8 @@ impl Script {
         DispatchProgram {
             runs,
             functions,
+            params: self.params.clone(),
+            checks,
             persistent: keyboard.persistent,
             keys,
         }
@@ -195,7 +210,9 @@ fn compile_block(
         if let Some((event, body)) = &row.handler {
             runs.push(KeyRun {
                 line: row.line,
-                source: format!("ON({event})"),
+                file: row.file.clone(),
+                source: row.input_source.clone(),
+                values: row.event_wire(),
                 handler: Some((
                     event.clone(),
                     compile_block(body, &mut Keyboard::default(), keys),
@@ -203,9 +220,15 @@ fn compile_block(
                 ..Default::default()
             });
         }
-        if row.clear_listeners || row.screenshot.is_some() || row.control.is_some() {
+        let statement = row.statement_wire();
+        if row.clear_listeners
+            || row.screenshot.is_some()
+            || row.control.is_some()
+            || statement.is_some()
+        {
             runs.push(KeyRun {
                 line: row.line,
+                file: row.file.clone(),
                 source: if row.clear_listeners {
                     "CLEAR_LISTENERS".into()
                 } else {
@@ -214,29 +237,45 @@ fn compile_block(
                 clear_listeners: row.clear_listeners,
                 screenshot: row.screenshot.clone(),
                 control: row.control.clone(),
+                values: statement,
                 ..Default::default()
             });
         }
-        if row.wait > 0 || row.wait_mouse || row.clear {
+        let wait = row.wait_wire();
+        if row.wait > 0 || row.wait_mouse || row.clear || wait.is_some() {
             runs.push(KeyRun {
                 line: row.line,
+                file: row.file.clone(),
                 source: if row.clear {
                     "CLEAR".into()
                 } else if row.wait_mouse {
                     "WaitMouseMove()".into()
+                } else if let Some((source, _)) = &wait {
+                    (*source).into()
                 } else {
                     format!("Wait({})", row.wait)
                 },
-                ticks: row.wait,
+                ticks: if wait.is_some() { 1 } else { row.wait },
                 held: keyboard.persistent.clone(),
                 wait_mouse: row.wait_mouse,
                 clear: row.clear,
+                values: wait.map(|(_, expression)| expression),
                 ..KeyRun::default()
             });
         }
-        if row.has_input() {
+        if let Some(input) = row.input_wire() {
             runs.push(KeyRun {
                 line: row.line,
+                file: row.file.clone(),
+                ticks: 1,
+                source: row.input_source.clone(),
+                values: Some(input),
+                ..KeyRun::default()
+            });
+        } else if row.has_input() {
+            runs.push(KeyRun {
+                line: row.line,
+                file: row.file.clone(),
                 ticks: 1,
                 held: keyboard.step(row.line, Some(&row.keys)).held,
                 source: row.input_source.clone(),
@@ -249,6 +288,7 @@ fn compile_block(
         if row.pause {
             runs.push(KeyRun {
                 line: row.line,
+                file: row.file.clone(),
                 source: "PAUSE".into(),
                 pause: true,
                 ..KeyRun::default()

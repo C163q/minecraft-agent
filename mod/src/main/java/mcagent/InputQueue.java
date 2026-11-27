@@ -2,22 +2,51 @@ package mcagent;
 
 import java.nio.file.Path;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import java.util.*;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.ToIntFunction;
 
 /** A block advances one fixed tick at a time alongside every other retained block. */
 final class InputQueue {
     static final List<String> EVENT_NAMES = List.of("Hurt", "HpLost", "Death", "CollideX", "CollideZ",
         "BlockBroken", "LeftGround", "ScreenOpened", "DamageBlocked", "BlockInteracted");
-    record Call(long id, String name, int line) {}
+    record Call(long id, String name, int line, String file) {}
     record Origin(String event, long block, int line, List<Call> call_stack) {}
     record ListenerState(String event, long block, int line, String state, List<Call> call_stack) {}
     record ActiveCall(long block, List<Call> call_stack, Integer last_line, String next, Integer next_line) {}
     record Entry(long block, int line, String source, String remaining_ticks, Origin listener, List<Call> call_stack) {}
 
-    static final class FunctionLimit extends RuntimeException {
-        FunctionLimit(String message) { super(message); }
+    static class ValueFailure extends RuntimeException {
+        private final long block;
+        private final String file;
+        private final int line;
+        private final List<Call> callStack;
+
+        private ValueFailure(long block, Run run, List<Call> callStack, String message) {
+            super("block " + block + ": " + run.location() + ": " + message
+                + (callStack == null ? "" : "; call stack " + String.join(" -> ",
+                    callStack.stream().map(c -> "$" + c.name + " at " + location(c.file, c.line)).toList())));
+            this.block = block;
+            this.file = run.file;
+            this.line = run.line;
+            this.callStack = callStack == null ? List.of() : callStack;
+        }
+
+        long block() { return block; }
+        String file() { return file; }
+        int line() { return line; }
+        List<Call> call_stack() { return callStack; }
+    }
+
+    static final class FunctionLimit extends ValueFailure {
+        private FunctionLimit(long block, Run run, List<Call> stack, String limit) {
+            super(block, run, stack, limit + " entering $" + run.call);
+        }
     }
 
     private static final class Listener {
@@ -25,6 +54,8 @@ final class InputQueue {
         final Frame owner;
         final Origin origin;
         final List<Run> body;
+        final ScriptValues.Scope captured;
+        final String binding;
         boolean handling;
 
         Listener(long order, Frame owner, Run run) {
@@ -32,17 +63,23 @@ final class InputQueue {
             this.owner = owner;
             this.origin = new Origin(run.event, owner.block.submission.id, run.line, owner.stack);
             this.body = run.body;
+            this.captured = owner.scope.child();
+            this.binding = run.values.binding();
         }
     }
-    record Tick(Set<String> held, MouseDispatch.Actions mouse, int line) {}
+    record Tick(Set<String> held, MouseDispatch.Actions mouse, int line, MouseDispatch.Prepared prepared) {}
 
-    private record Run(int line, String source, long ticks, Set<String> legacyHeld,
+    private record Run(int line, String file, String source, long ticks, Set<String> legacyHeld,
                        Map<String,String> keys, MouseDispatch.Actions mouse,
                        boolean waitMouse, boolean clear, boolean pause, String event, List<Run> body,
-                       boolean clearListeners, Path screenshot, String call, boolean returned) {
-        static Run read(JsonObject json, Set<String> knownKeys, boolean incremental, boolean inHandler, Set<String> functions) {
+                       boolean clearListeners, Path screenshot, String call, boolean returned, InputValues values) {
+        String location() { return InputQueue.location(file, line); }
+
+        static Run read(JsonObject json, Set<String> knownKeys, boolean incremental, boolean inHandler,
+                        Map<String,List<String>> params) {
             int line = json.get("line").getAsInt();
             if (line < 1) throw new IllegalArgumentException("invalid source line");
+            String file = json.has("file") ? ScriptValues.string(json.get("file")) : null;
             try {
                 long ticks = Long.parseUnsignedLong(json.get("ticks").getAsString());
                 boolean wait = flag(json, "wait_mouse"), clear = flag(json, "clear"), pause = flag(json, "pause");
@@ -53,7 +90,7 @@ final class InputQueue {
                     if (inHandler || !EVENT_NAMES.contains(event))
                         throw new IllegalArgumentException("invalid listener declaration");
                     for (var row : json.getAsJsonArray("body"))
-                        body.add(read(row.getAsJsonObject(), knownKeys, incremental, true, functions));
+                        body.add(read(row.getAsJsonObject(), knownKeys, incremental, true, params));
                     controls++;
                 }
                 String call = null;
@@ -62,7 +99,7 @@ final class InputQueue {
                     if (!target.isJsonPrimitive() || !target.getAsJsonPrimitive().isString())
                         throw new IllegalArgumentException("expected a function name");
                     call = target.getAsString();
-                    if (!functions.contains(call)) throw new IllegalArgumentException("undefined function $" + call);
+                    if (!params.containsKey(call)) throw new IllegalArgumentException("undefined function $" + call);
                     controls++;
                 }
                 boolean returned = json.has("return");
@@ -78,8 +115,12 @@ final class InputQueue {
                     throw new IllegalArgumentException("expected absolute screenshot path");
                 if (clearListeners) controls++;
                 if (screenshot != null) controls++;
+                var values = InputValues.read(json.getAsJsonObject("v"), event, call, returned);
+                if (call != null && values.args().size() != params.get(call).size())
+                    throw new IllegalArgumentException("$" + call + " expects " + params.get(call).size() + " arguments");
+                if ((values.assignment() && call == null) || values.op().equals("print")) controls++;
                 if (controls != (ticks == 0 ? 1 : 0)) throw new IllegalArgumentException("invalid control duration");
-                if (!incremental && (pause || call != null || returned || json.has("key_actions")))
+                if (!incremental && (pause || call != null || returned || json.has("key_actions") || json.has("v")))
                     throw new IllegalArgumentException("incremental actions require queue_version 1");
                 var held = names(json, "held", knownKeys);
                 var actions = new TreeMap<String,String>();
@@ -91,8 +132,11 @@ final class InputQueue {
                     actions.put(name, action);
                 });
                 var mouse = MouseDispatch.Actions.read(json);
-                if (ticks != 1 && (!actions.isEmpty() || !mouse.moves().isEmpty() || !mouse.buttons().isEmpty()))
+                boolean hasStaticInput = !actions.isEmpty() || !mouse.moves().isEmpty() || !mouse.buttons().isEmpty();
+                if (ticks != 1 && (hasStaticInput || values.input() || values.delay()))
                     throw new IllegalArgumentException("input actions require one tick");
+                if (hasStaticInput && (values.input() || values.delay()))
+                    throw new IllegalArgumentException("cannot combine static and dynamic inputs in the same entry");
                 String source;
                 if (json.has("source")) source = json.get("source").getAsString();
                 else if (clear) source = "CLEAR";
@@ -102,15 +146,20 @@ final class InputQueue {
                 else if (returned) source = "RETURN";
                 else if (!incremental) source = "legacy input, held " + held;
                 else source = "input at line " + line;
-                return new Run(line, source, ticks, incremental ? null : held, actions, mouse, wait, clear, pause, event, List.copyOf(body), clearListeners, screenshot, call, returned);
+                return new Run(line, file, source, ticks, incremental ? null : held, actions, mouse, wait, clear, pause,
+                    event, List.copyOf(body), clearListeners, screenshot, call, returned, values);
             } catch (RuntimeException error) {
-                throw new IllegalArgumentException("line " + line + ": " + error.getMessage());
+                throw new IllegalArgumentException(InputQueue.location(file, line) + ": " + error.getMessage(), error);
             }
         }
 
         private static boolean flag(JsonObject obj, String name) {
             return obj.has(name) && obj.get(name).getAsBoolean();
         }
+    }
+
+    private static String location(String file, int line) {
+        return (file == null ? "" : file + ": ") + "line " + line;
     }
 
     private static Set<String> names(JsonObject json, String field, Set<String> knownKeys) {
@@ -126,25 +175,34 @@ final class InputQueue {
     /** All branches of a submission use the same definitions and zero-tick budget. */
     private static final class Submission {
         final Map<String,List<Run>> functions = new HashMap<>();
+        final Map<String,List<String>> params = new HashMap<>();
         long id, budgetTick;
         int entries;
     }
+
+    private record ReturnAssignment(Frame caller, Run run, Consumer<JsonElement> write) {}
 
     private static final class Frame {
         final Block block;
         final Frame parent; // Calling frame, or the listener's registration frame.
         final List<Call> stack;
         final List<Run> code;
+        final ScriptValues.Scope scope;
+        final ReturnAssignment destination;
         int pc;
         Integer lastLine;
         long remaining;
         boolean registeredListener;
+        boolean waitStarted;
 
-        Frame(Block block, Frame parent, List<Call> stack, List<Run> code) {
+        Frame(Block block, Frame parent, List<Call> stack, List<Run> code, ScriptValues.Scope scope,
+              ReturnAssignment destination) {
             this.block = block;
             this.parent = parent;
             this.stack = stack;
             this.code = code;
+            this.scope = scope;
+            this.destination = destination;
             loadRemaining();
         }
 
@@ -158,6 +216,7 @@ final class InputQueue {
 
         private void loadRemaining() {
             remaining = pc == code.size() ? 0 : code.get(pc).ticks;
+            waitStarted = false;
         }
 
         boolean descendsFrom(Frame ancestor) {
@@ -176,12 +235,13 @@ final class InputQueue {
         long id, observation, group;
         boolean detached;
 
-        private Block(Submission submission, Set<String> legacyFinal, Listener listener, List<Run> body) {
+        private Block(Submission submission, Set<String> legacyFinal, Listener listener, List<Run> body,
+                      ScriptValues.Scope scope) {
             this.submission = submission;
             this.legacyFinal = legacyFinal;
             this.listener = listener;
             var owner = listener == null ? null : listener.owner;
-            frames.push(new Frame(this, owner, owner == null ? null : owner.stack, body));
+            frames.push(new Frame(this, owner, owner == null ? null : owner.stack, body, scope, null));
             onlyClearsListeners = !body.isEmpty() && body.stream().allMatch(Run::clearListeners);
         }
 
@@ -194,22 +254,39 @@ final class InputQueue {
             var finalKeys = names(json, "persistent", knownKeys);
             var submission = new Submission();
             var definitions = json.has("functions") ? json.getAsJsonObject("functions") : new JsonObject();
-            if (!incremental && json.has("functions"))
+            if (!incremental && (json.has("functions") || json.has("params") || json.has("checks")))
                 throw new IllegalArgumentException("functions require queue_version 1");
-            var symbols = definitions.keySet();
-            for (var entry : definitions.entrySet()) {
-                String name = entry.getKey();
+            for (var name : definitions.keySet()) {
                 if (!name.matches("[A-Za-z_][A-Za-z0-9_]*"))
                     throw new IllegalArgumentException("invalid function name $" + name);
-                submission.functions.put(name, readRuns(entry.getValue().getAsJsonArray(), knownKeys, incremental, symbols));
+                submission.params.put(name, List.of());
             }
-            var body = readRuns(json.getAsJsonArray("runs"), knownKeys, incremental, symbols);
-            return new Block(submission, incremental ? null : finalKeys, null, body);
+            if (json.has("params")) for (var entry : json.getAsJsonObject("params").entrySet()) {
+                var name = entry.getKey();
+                if (!submission.params.containsKey(name))
+                    throw new IllegalArgumentException("undefined function $" + name + " in parameter definitions");
+                var parameters = new LinkedHashSet<String>();
+                for (var value : entry.getValue().getAsJsonArray()) {
+                    String parameter = ScriptValues.name(value);
+                    if (!parameters.add(parameter))
+                        throw new IllegalArgumentException("duplicate parameter $" + parameter + " of $" + name);
+                }
+                submission.params.put(name, List.copyOf(parameters));
+            }
+            for (var entry : definitions.entrySet()) {
+                var code = readRuns(entry.getValue().getAsJsonArray(), knownKeys, incremental, submission.params);
+                submission.functions.put(entry.getKey(), code);
+            }
+            if (json.has("checks")) for (var rows : json.getAsJsonArray("checks"))
+                readRuns(rows.getAsJsonArray(), knownKeys, incremental, submission.params);
+            var body = readRuns(json.getAsJsonArray("runs"), knownKeys, incremental, submission.params);
+            return new Block(submission, incremental ? null : finalKeys, null, body, new ScriptValues.Scope());
         }
 
-        private static List<Run> readRuns(JsonArray rows, Set<String> knownKeys, boolean incremental, Set<String> symbols) {
+        private static List<Run> readRuns(JsonArray rows, Set<String> knownKeys, boolean incremental,
+                                          Map<String,List<String>> params) {
             var runs = new ArrayList<Run>(rows.size());
-            for (var row : rows) runs.add(Run.read(row.getAsJsonObject(), knownKeys, incremental, false, symbols));
+            for (var row : rows) runs.add(Run.read(row.getAsJsonObject(), knownKeys, incremental, false, params));
             return List.copyOf(runs);
         }
     }
@@ -234,7 +311,13 @@ final class InputQueue {
         for (var listener : listeners) {
             if (!listener.handling && listener.origin.event.equals(event)) {
                 listener.handling = true;
-                var block = new Block(listener.owner.block.submission, null, listener, listener.body);
+                var scope = listener.captured.child();
+                if (listener.binding != null) {
+                    var snapshot = fields == null ? new JsonObject() : fields.deepCopy();
+                    snapshot.addProperty("event", event);
+                    scope.declare(listener.binding, snapshot, true);
+                }
+                var block = new Block(listener.owner.block.submission, null, listener, listener.body, scope);
                 block.id = ++lastId;
                 if (observation == 0) observation = block.id;
                 block.observation = observation;
@@ -295,6 +378,7 @@ final class InputQueue {
     private Submission foreground;
     // A handler that CLEARs the foreground finishes its own work before reporting END.
     private Block completingForeground;
+    private JsonElement returnValue;
 
     private void forgetForeground() {
         foreground = null;
@@ -317,6 +401,7 @@ final class InputQueue {
         blocks.add(block);
         foreground = block.submission;
         completingForeground = null;
+        returnValue = null;
         return block.id;
     }
 
@@ -328,10 +413,22 @@ final class InputQueue {
         pauseListeners = List.of();
         persistent.clear();
         forgetForeground();
+        returnValue = null;
+    }
+
+    /** Java null means that the current submission has not explicitly returned a value. */
+    JsonElement takeReturnValue() {
+        var result = returnValue;
+        returnValue = null;
+        return result;
     }
 
     /** A newer submission runs its leading CLEAR first. Observations in one batch run in registration order. */
     String controls(BooleanSupplier moving, Runnable clearMoves) {
+        return controls(moving, clearMoves, ignored -> {});
+    }
+
+    String controls(BooleanSupplier moving, Runnable clearMoves, Consumer<String> print) {
         activateObserved();
         if (!blocks.isEmpty()) {
             var newest = blocks.getLast();
@@ -351,7 +448,7 @@ final class InputQueue {
             boundary.revisit = false;
             for (var block : order) {
                 if (!blocks.contains(block) || boundary.paused.contains(block)) continue;
-                execute(block, boundary, moving, clearMoves);
+                execute(block, boundary, moving, clearMoves, print);
             }
         } while (boundary.revisit);
         if (completingForeground != null && !blocks.contains(completingForeground)) {
@@ -376,7 +473,8 @@ final class InputQueue {
         }
     }
 
-    private void execute(Block block, Boundary boundary, BooleanSupplier moving, Runnable clearMoves) {
+    private void execute(Block block, Boundary boundary, BooleanSupplier moving, Runnable clearMoves,
+                         Consumer<String> print) {
         while (true) {
             var frame = block.current();
             var run = frame.head();
@@ -384,33 +482,52 @@ final class InputQueue {
             boolean returnsFromOwner = run == null ? frame.parent != null : run.returned;
             if (returnsFromOwner && boundary.deferReturn.contains(frame)) return;
             if (run == null) {
-                if (!leave(block, frame, false, boundary)) return;
+                if (!leave(block, frame, false, null, boundary)) return;
                 continue;
             }
             if (run.ticks != 0 || (run.waitMouse && moving.getAsBoolean())) return;
             frame.next();
-            if (run.call != null) enter(block, frame, run);
-            else if (run.returned) {
-                if (block.listener != null && block.frames.size() == 1) {
-                    returnFromHandler(block, boundary);
+            try {
+                if (run.call != null) enter(block, frame, run);
+                else if (run.returned) {
+                    var value = run.values.expr() == null ? null : ScriptValues.evaluate(run.values.expr(), frame.scope);
+                    if (block.listener != null && block.frames.size() == 1) {
+                        returnFromHandler(block, value, boundary);
+                        return;
+                    }
+                    if (!leave(block, frame, true, value, boundary)) return;
+                } else if (run.values.assignment()) {
+                    var destination = assignment(frame, run);
+                    destination.write.accept(ScriptValues.evaluate(run.values.expr(), frame.scope));
+                } else if (run.values.op().equals("print")) {
+                    print.accept(ScriptValues.format(run.values.format(), run.values.evaluateArgs(frame.scope)));
+                } else if (run.event != null) {
+                    frame.registeredListener = true;
+                    listeners.add(new Listener(++lastRegistration, frame, run));
+                } else if (run.clearListeners) listeners.clear();
+                else if (run.screenshot != null) screenshots.add(run.screenshot);
+                else if (run.pause) {
+                    boundary.pause(block);
+                    if (frame.head() == null && block.frames.size() == 1) expireListeners(frame);
                     return;
+                } else if (run.clear) {
+                    clearBefore(block, boundary);
+                    clearMoves.run();
+                    boundary.revisit = true;
                 }
-                if (!leave(block, frame, true, boundary)) return;
-            } else if (run.event != null) {
-                frame.registeredListener = true;
-                listeners.add(new Listener(++lastRegistration, frame, run));
-            } else if (run.clearListeners) listeners.clear();
-            else if (run.screenshot != null) screenshots.add(run.screenshot);
-            else if (run.pause) {
-                boundary.pause(block);
-                if (frame.head() == null && block.frames.size() == 1) expireListeners(frame);
-                return;
-            } else if (run.clear) {
-                clearBefore(block, boundary);
-                clearMoves.run();
-                boundary.revisit = true;
+            } catch (IllegalArgumentException error) {
+                throw fail(frame, run, error);
             }
         }
+    }
+
+    private static ReturnAssignment assignment(Frame frame, Run run) {
+        if (run.values.op().equals("let")) {
+            String name = run.values.declarationName();
+            return new ReturnAssignment(frame, run, value -> frame.scope.declare(name, value, false));
+        }
+        var target = ScriptValues.target(run.values.target(), frame.scope);
+        return new ReturnAssignment(frame, run, target::write);
     }
 
     private void clearBefore(Block block, Boundary boundary) {
@@ -433,7 +550,7 @@ final class InputQueue {
 
     private void enter(Block block, Frame parent, Run run) {
         var stack = parent.stack == null ? new ArrayList<Call>() : new ArrayList<>(parent.stack);
-        var call = new Call(++lastCall, run.call, run.line);
+        var call = new Call(++lastCall, run.call, run.line, run.file);
         stack.add(call);
         if (block.submission.budgetTick != tick) {
             block.submission.budgetTick = tick;
@@ -443,25 +560,26 @@ final class InputQueue {
         if (stack.size() > 32) limit = "function depth limit 32";
         else if (++block.submission.entries > 4096) limit = "function entry limit 4096";
         if (limit != null) {
-            for (var other : List.copyOf(blocks))
-                if (other.submission == block.submission) removeBlock(other);
-            pending.removeIf(b -> b.submission == block.submission);
-            if (foreground == block.submission ||
-                    (completingForeground != null && completingForeground.submission == block.submission)) forgetForeground();
-            String chain = String.join(" -> ", stack.stream().map(c -> "$" + c.name + " at line " + c.line).toList());
-            throw new FunctionLimit("block " + block.submission.id + ": " + limit + " entering $" + run.call
-                + " at line " + run.line + "; call stack " + chain);
+            abort(block.submission);
+            throw new FunctionLimit(block.submission.id, run, List.copyOf(stack), limit);
         }
-        block.frames.push(new Frame(block, parent, List.copyOf(stack), block.submission.functions.get(run.call)));
+        var destination = run.values.assignment() ? assignment(parent, run) : null;
+        var scope = new ScriptValues.Scope();
+        var arguments = run.values.evaluateArgs(parent.scope);
+        var params = block.submission.params.get(run.call);
+        for (int i = 0; i < arguments.size(); ++i) scope.declare(params.get(i), arguments.get(i), false);
+        block.frames.push(new Frame(block, parent, List.copyOf(stack), block.submission.functions.get(run.call),
+            scope, destination));
     }
 
     /** RETURN in a handler targets its registration, even when the owner is currently in a child call. */
-    private void returnFromHandler(Block block, Boundary boundary) {
+    private void returnFromHandler(Block block, JsonElement value, Boundary boundary) {
         Frame owner = block.listener.owner;
         if (block.detached || !blocks.contains(owner.block)) {
             if (!block.detached && owner.parent == null) cancelChildren(owner);
             removeBlock(block);
             if (block.submission == foreground && completingForeground == null) {
+                if (owner.parent == null) returnValue = value;
                 forgetForeground();
                 boundary.end = true;
             }
@@ -471,17 +589,25 @@ final class InputQueue {
             var child = owner.block.frames.pop();
             expireListeners(child);
         }
-        leave(owner.block, owner, true, boundary);
+        leave(owner.block, owner, true, value, boundary);
         boundary.revisit = true;
     }
 
     /** True when this branch continues in its caller at the same boundary. */
-    private boolean leave(Block block, Frame frame, boolean explicit, Boundary boundary) {
+    private boolean leave(Block block, Frame frame, boolean explicit, JsonElement value, Boundary boundary) {
         boolean root = block.frames.size() == 1;
         if (explicit || !root) cancelChildren(frame);
         expireListeners(frame);
         if (!root) {
             block.frames.pop();
+            if (frame.destination != null) {
+                var destination = frame.destination;
+                try {
+                    destination.write.accept(value == null ? JsonNull.INSTANCE : value);
+                } catch (IllegalArgumentException error) {
+                    throw fail(destination.caller, destination.run, error);
+                }
+            }
             return true;
         }
         removeBlock(block);
@@ -491,6 +617,7 @@ final class InputQueue {
         }
         if (block.listener != null) boundary.end = true;
         else if (foreground == block.submission) {
+            returnValue = value;
             forgetForeground();
             boundary.end = true;
         }
@@ -514,24 +641,85 @@ final class InputQueue {
         if (block.listener != null) block.listener.handling = false;
     }
 
+    private ValueFailure fail(Frame frame, Run run, RuntimeException error) {
+        abort(frame.block.submission);
+        var failure = new ValueFailure(frame.block.submission.id, run, frame.stack, error.getMessage());
+        failure.initCause(error);
+        return failure;
+    }
+
+    private void abort(Submission submission) {
+        for (var other : List.copyOf(blocks))
+            if (other.submission == submission) removeBlock(other);
+        pending.removeIf(b -> b.submission == submission);
+        listeners.removeIf(l -> l.owner.block.submission == submission);
+        if (foreground == submission ||
+                completingForeground != null && completingForeground.submission == submission) forgetForeground();
+    }
+
     Tick input() {
+        return input(KeyDispatch::resolve, rows -> null);
+    }
+
+    Tick input(ToIntFunction<String> resolveKey, Function<List<MouseDispatch.Row>,MouseDispatch.Prepared> prepareMouse) {
         var keys = new TreeMap<String,String>();
         var buttons = new TreeMap<Integer,String>();
         var moves = new ArrayList<MouseDispatch.Input>();
+        var mouseRows = new ArrayList<MouseDispatch.Row>();
+        var mouseSources = new ArrayList<Frame>();
+        var durations = new HashMap<Frame,Long>();
         Set<String> legacyHeld = null;
         int line = 0;
         for (var block : blocks) {
-            var run = block.current().head();
-            keys.putAll(run.keys);
-            buttons.putAll(run.mouse.buttons());
-            moves.addAll(run.mouse.moves());
+            var frame = block.current();
+            var run = frame.head();
+            if (run == null) continue;
+            try {
+                if (run.values.delay() && !frame.waitStarted) {
+                    long delay = ScriptValues.waitTicks(ScriptValues.evaluate(run.values.expr(), frame.scope));
+                    durations.put(frame, delay);
+                }
+                List<MouseDispatch.Input> rowMoves;
+                Map<Integer,String> rowButtons;
+                boolean dynamic = run.values.input();
+                if (dynamic) {
+                    var resolved = run.values.evaluateInput(frame.scope, resolveKey);
+                    keys.putAll(resolved.keys);
+                    rowButtons = resolved.buttons;
+                    rowMoves = resolved.moves;
+                } else {
+                    keys.putAll(run.keys);
+                    rowButtons = run.mouse.buttons();
+                    rowMoves = run.mouse.moves();
+                }
+                buttons.putAll(rowButtons);
+                moves.addAll(rowMoves);
+                if (dynamic || !rowMoves.isEmpty() || !rowButtons.isEmpty()) {
+                    mouseRows.add(new MouseDispatch.Row(rowMoves, !rowButtons.isEmpty(), dynamic));
+                    mouseSources.add(frame);
+                }
+            } catch (IllegalArgumentException error) {
+                throw fail(frame, run, error);
+            }
             if (run.legacyHeld != null) legacyHeld = run.legacyHeld;
             line = run.line;
         }
+        MouseDispatch.Prepared prepared;
+        try {
+            prepared = prepareMouse.apply(mouseRows);
+        } catch (MouseDispatch.PreflightFailure error) {
+            var frame = mouseSources.get(error.row);
+            throw fail(frame, frame.head(), error);
+        }
+        // A sibling's failure leaves the candidate tick unconsumed, including first-time waits.
+        durations.forEach((frame, duration) -> {
+            frame.remaining = duration;
+            frame.waitStarted = true;
+        });
         if (legacyHeld != null) {
             // Before legacy END we only know which previously persistent keys were definitely released.
             persistent.retainAll(legacyHeld);
-            return new Tick(legacyHeld, new MouseDispatch.Actions(moves, buttons), line);
+            return new Tick(legacyHeld, new MouseDispatch.Actions(moves, buttons), line, prepared);
         }
         var wanted = new TreeSet<>(persistent);
         keys.forEach((key, action) -> {
@@ -543,7 +731,7 @@ final class InputQueue {
                 wanted.add(key);
             }
         });
-        return new Tick(wanted, new MouseDispatch.Actions(moves, buttons), line);
+        return new Tick(wanted, new MouseDispatch.Actions(moves, buttons), line, prepared);
     }
 
     void advance() {
@@ -585,7 +773,8 @@ final class InputQueue {
         for (var frame : block.frames) {
             for (int i = frame.pc; i < frame.code.size(); i++) {
                 var run = frame.code.get(i);
-                String remaining = run.ticks == 0 ? null : Long.toUnsignedString(i == frame.pc ? frame.remaining : run.ticks);
+                String remaining = run.ticks == 0 || (run.values.delay() && (i != frame.pc || !frame.waitStarted))
+                    ? null : Long.toUnsignedString(i == frame.pc ? frame.remaining : run.ticks);
                 rows.add(new Entry(block.id, run.line, run.source, remaining,
                     block.listener == null ? null : block.listener.origin, frame.stack));
             }

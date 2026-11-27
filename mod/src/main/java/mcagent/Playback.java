@@ -5,6 +5,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import net.minecraft.resources.Identifier;
 import org.slf4j.LoggerFactory;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -60,12 +61,14 @@ public final class Playback {
 
     record Snapshot(ClientLevel level, Set<String> persistent) {}
     record Transition(String direction, String status, boolean input_cleared) {}
+    record ScriptError(String message, long block, String file, int line, List<InputQueue.Call> call_stack) {}
+    record Output(String stdout, JsonElement returnValue, ScriptError error, String captureError) {}
     record Observation(long ticks, String world, String pauseReason, List<InputQueue.Origin> listeners,
                        EventJournal.Report events, byte[] png, FrameCamera.View camera,
-                       Transition transition, String screen) {
+                       Transition transition, String screen, Output output) {
         Observation(long ticks, String world, String pauseReason, List<InputQueue.Origin> listeners,
                     EventJournal.Report events, byte[] png, FrameCamera.View camera) {
-            this(ticks, world, pauseReason, listeners, events, png, camera, null, null);
+            this(ticks, world, pauseReason, listeners, events, png, camera, null, null, null);
         }
     }
     record Held(Map<String,String> keys, Map<String,String> buttons) {}
@@ -80,6 +83,18 @@ public final class Playback {
         final EventJournal events = new EventJournal();
         final boolean includeScreenshot;
         final long maxTicks;
+        final StringBuilder stdout = new StringBuilder();
+        JsonElement returnValue;
+        ScriptError error;
+        String captureError;
+
+        void print(String line) {
+            if (line.length() > ScriptValues.MAX_OUTPUT_CHARS - stdout.length())
+                throw new IllegalArgumentException("stdout exceeds the per-call size limit");
+            stdout.append(line);
+        }
+
+        Output output() { return new Output(stdout.toString(), returnValue, error, captureError); }
         long executed;
         long deathObservation;
 
@@ -356,15 +371,20 @@ public final class Playback {
         if (running && queue.hasObserved()) resolveControls(mc);
         if (frozen() && !mc.isPaused()) return false; // Suppress catch-up ticks in the stopping frame.
         if (mc.isPaused() && !mc.gui.isPausing()) return true;
-        simulatingPlayer = !mc.isPaused() && mc.player != null;
-        if (simulatingPlayer) {
-            previousContacts = contactPlayer == mc.player ? currentContacts : 0;
-            currentContacts = 0;
-            contactPlayer = mc.player;
+        if (!running || (queue.isEmpty() && keys.isEmpty() && !mouse.active())) {
+            beginSimulationTick(mc);
+            return true;
         }
-        inTick = true;
-        if (!running || (queue.isEmpty() && keys.isEmpty() && !mouse.active())) return true;
-        var input = queue.input();
+        InputQueue.Tick input;
+        try {
+            input = queue.input(name -> codes.computeIfAbsent(name, KeyDispatch::resolve),
+                rows -> mouse.prepare(mc, rows, maxSpeed));
+        } catch (InputQueue.ValueFailure failure) {
+            inTick = simulatingPlayer = false;
+            stopWithError(mc, failure);
+            return false;
+        }
+        beginSimulationTick(mc);
         var request = active;
         long generation = ++inputGeneration;
         BooleanSupplier valid = () -> appliedInput && inputGeneration == generation
@@ -373,13 +393,25 @@ public final class Playback {
         try {
             var target = new TreeSet<Integer>();
             for (var name : input.held()) target.add(codes.get(name));
-            keys.apply(mc, target, valid);
-            if (valid.getAsBoolean()) mouse.tick(mc, input.mouse(), maxSpeed, keys.modifiers(), valid);
+            boolean prepared = input.prepared() != null;
+            if (prepared && valid.getAsBoolean()) mouse.applyPreparedMotion(mc, input.prepared(), valid);
+            if (valid.getAsBoolean()) keys.apply(mc, target, valid);
+            if (valid.getAsBoolean()) mouse.tick(mc, input.mouse(), prepared, maxSpeed, keys.modifiers(), valid);
         } catch (RuntimeException error) {
             if (valid.getAsBoolean()) reset(mc, "line " + input.line() + ": " + error.getMessage());
             else if (request != null) request.result.completeExceptionally(error);
         }
         return true;
+    }
+
+    private void beginSimulationTick(Minecraft mc) {
+        simulatingPlayer = !mc.isPaused() && mc.player != null;
+        if (simulatingPlayer) {
+            previousContacts = contactPlayer == mc.player ? currentContacts : 0;
+            currentContacts = 0;
+            contactPlayer = mc.player;
+        }
+        inTick = true;
     }
 
     public void afterTick(Minecraft mc) {
@@ -404,12 +436,13 @@ public final class Playback {
     private void resolveControls(Minecraft mc) {
         String boundary;
         try {
-            boundary = queue.controls(mouse::pending, mouse::clearMoves);
-        } catch (InputQueue.FunctionLimit failure) {
-            lastError = failure.getMessage();
-            hotkeyStop = false;
-            screenshotPaths = queue.takeScreenshots();
-            stop(mc, "error");
+            var request = active;
+            boundary = queue.controls(mouse::pending, mouse::clearMoves,
+                request == null ? ignored -> {} : request::print);
+            var value = queue.takeReturnValue();
+            if (request != null && value != null) request.returnValue = value;
+        } catch (InputQueue.ValueFailure failure) {
+            stopWithError(mc, failure);
             return;
         }
         if (hotkeyStop) {
@@ -420,6 +453,19 @@ public final class Playback {
         if (boundary == null && active != null && active.executed >= active.maxTicks) boundary = "max_ticks";
         if (boundary == null && !screenshotPaths.isEmpty()) boundary = "capture";
         if (boundary != null) stop(mc, boundary);
+    }
+
+    private void stopWithError(Minecraft mc, InputQueue.ValueFailure failure) {
+        lastError = failure.getMessage();
+        if (active != null) {
+            var stack = failure.call_stack();
+            active.error = new ScriptError(lastError, failure.block(), failure.file(), failure.line(),
+                stack == null ? List.of() : stack);
+            active.returnValue = queue.takeReturnValue();
+        }
+        hotkeyStop = false;
+        screenshotPaths = queue.takeScreenshots();
+        stop(mc, "error");
     }
 
     private void stop(Minecraft mc, String reason) {
@@ -495,9 +541,10 @@ public final class Playback {
         var events = request.events.seal();
         var report = new Transition(wait.direction, status, true);
         String inputScreen = GameInspection.screenName(mc);
+        Output output = request.output();
         if (!request.includeScreenshot) {
             request.result.complete(new Observation(request.executed, world, "world_changed", List.of(), events,
-                null, null, report, inputScreen));
+                null, null, report, inputScreen, output));
             return;
         }
         // Native loading and saving can discard queued client tasks. Only the frozen frame data crosses threads.
@@ -515,7 +562,7 @@ public final class Playback {
                             if (!request.result.isDone()) {
                                 byte[] png = FrameFiles.encode(image, List.of());
                                 request.result.complete(new Observation(ticks, world, "world_changed", List.of(),
-                                    events, png, camera, report, inputScreen));
+                                    events, png, camera, report, inputScreen, output));
                             }
                         } catch (IOException | RuntimeException failure) {
                             request.result.completeExceptionally(failure);
@@ -552,7 +599,7 @@ public final class Playback {
         boolean intermediate = "capture".equals(reason);
         // Close the window at the stop frame before starting any readback and encoding.
         var events = r != null && !intermediate ? r.events.seal() : null;
-        boolean returnImage = r != null && r.includeScreenshot && !intermediate && lastError == null;
+        boolean returnImage = r != null && r.includeScreenshot && !intermediate;
         if (!returnImage && screenshotPaths.isEmpty()) {
             completeStop(mc, r, world, reason, events, null, null);
             return;
@@ -573,7 +620,7 @@ public final class Playback {
                     if (captureGeneration != generation) return;
                     capturing = false;
                     screenshotPaths = List.of();
-                    if (failure != null) captureFailed(mc, failure);
+                    if (failure != null) captureFailed(mc, world, events, failure);
                     else if (intermediate) {
                         if (resumeAfterCapture) {
                             resumeAfterCapture = false;
@@ -584,25 +631,23 @@ public final class Playback {
                 }));
             });
         } catch (RuntimeException error) {
-            captureFailed(mc, error);
+            captureFailed(mc, world, events, error);
         }
     }
 
-    private void captureFailed(Minecraft mc, Throwable failure) {
+    private void captureFailed(Minecraft mc, String world, EventJournal.Report events, Throwable failure) {
         var request = active;
-        active = null;
         screenshotPaths = List.of();
         capturing = resumeAfterCapture = false;
         if ("capture".equals(pauseReason)) pauseReason = "pause";
-        if (lastError != null) {
-            lastError += "; screenshot failed: " + failure;
-            var combined = new IllegalStateException(lastError);
-            combined.addSuppressed(failure);
-            failure = combined;
+        String message = "screenshot failed: " + failure;
+        lastError = lastError == null ? message : lastError + "; " + message;
+        if (request != null) {
+            request.captureError = message;
+            completeStop(mc, request, world, pauseReason, events == null ? request.events.seal() : events, null, null);
+        } else {
+            LoggerFactory.getLogger("minecraft-agent").warn("Frame capture failed", failure);
         }
-        if (request != null) request.result.completeExceptionally(failure);
-        else LoggerFactory.getLogger("minecraft-agent").warn("Frame capture failed", failure);
-        if (endInNativeMenu && mc.gui.isPausing()) freeze = false;
     }
 
     private void completeStop(Minecraft mc, Request r, String world, String reason, EventJournal.Report events,
@@ -610,8 +655,8 @@ public final class Playback {
         active = null;
         if (endInNativeMenu && world.equals("not_needed") && mc.gui.isPausing()) freeze = false;
         if (r != null) {
-            if (lastError != null) r.result.completeExceptionally(new IllegalStateException(lastError));
-            else r.result.complete(new Observation(r.executed, world, reason, pauseListeners, events, png, camera));
+            r.result.complete(new Observation(r.executed, world, reason, pauseListeners, events, png, camera,
+                null, null, r.output()));
         }
         if (resumeAfterCapture) resume(mc);
     }
