@@ -1,4 +1,5 @@
 """Observe native player deaths and horizontal contacts through the public MCP."""
+import json
 from typing import NamedTuple
 import time
 
@@ -11,7 +12,7 @@ class PlayerState(NamedTuple):
     dead: bool
 
 
-def exercise_player_events(work, log, send, hit, handler, inspect, codex_env=None):
+def exercise_player_events(work, log, send, hit, handler, inspect, rpc, codex_env=None):
     def control_file(name):
         path = work / name
         path.touch()
@@ -52,6 +53,10 @@ def exercise_player_events(work, log, send, hit, handler, inspect, codex_env=Non
     assert abs(state.x - .5) < .01 and 1.69 < state.z < 1.71, state
     assert state.step_z > .0001, state  # First contact still allowed a partial step.
     assert inspect()["world"] == "paused"
+    # A rejected candidate tick must preserve the current contact edge as well as held W.
+    bad = rpc("tools/call", {"name": "input_script", "arguments": {
+        "script": "BEGIN\nCLEAR\nLET $n = 0\nWait($n)\nEND", "include_screenshot": False}})
+    assert bad.get("isError") and json.loads(bad["content"][0]["text"])["ticks"] == 0
     hit("slide-then-push")
     assert listen(axes, "Wait(5)", ticks=5) == []
     assert listen(axes, "KeyRelease(w) KeyPress(s)", "Wait(4)", ticks=5) == []

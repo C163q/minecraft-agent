@@ -129,7 +129,7 @@ def exercise_events(work, log, play, rpc, block, inspect, codex_env=None):
     assert response["pause_reason"] == "end" and not origins(response), response
     assert "AGENT_RESPAWN" in log.read_text()
     from player_events import exercise_player_events
-    exercise_player_events(work, log, send, hit, handler, inspect, codex_env)
+    exercise_player_events(work, log, send, hit, handler, inspect, rpc, codex_env)
     hit("change-level")
     moved = rpc("tools/call", {"name": "input_script", "arguments":
                 dict(block(*handler("Hurt", "Key(s)"), "Wait(200)"), include_screenshot=False)})

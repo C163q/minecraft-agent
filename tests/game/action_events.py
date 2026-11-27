@@ -108,20 +108,22 @@ def exercise_action_events(work, log, play, rpc, block, inspect):
     result = play({"script": dedent("""\
         FUNCTION $close_door
         BEGIN
-            ON(BlockInteracted)
+            ON(BlockInteracted($hit))
             BEGIN
                 Wait(2)
-                RETURN
+                RETURN $hit.after
             END
             Mouse(right)
             Wait(25)
         END
         BEGIN
             CLEAR
-            $close_door()
+            LET $observed = $close_door()
             ScreenShot("door-after-return.png")
+            RETURN $observed
         END
     """)}, None, "door-closed")
+    assert result["return_value"] == closed, result
     assert payloads(result, ["BlockInteracted"]) == [interaction(TARGET, "main_hand", None, opened, closed)], result
     paused_by(result, [])
     assert result["ticks"] < 26 and server()[:2] == server(lower=True)[:2] == (door, "false"), result

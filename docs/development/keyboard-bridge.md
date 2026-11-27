@@ -11,7 +11,7 @@ cargo build --release --bin minecraft-mcp
 python3 mod/build.py /absolute/game-root/versions/26.3-Fabric/26.3-Fabric.json
 ```
 
-产物为 `target/release/minecraft-mcp` 和 `mod/build/minecraft-agent.jar`。Python 构建脚本从实例清单组装类路径，使用 JDK 自带的 `javac` 和 `jar`，运行时依赖游戏和 Loader。将 Mod JAR 复制到目标 Fabric 实例实际使用的 `mods/`，重启实例。新版 MCP 在发送输入前检查 Mod 是否声明支持 `max_ticks`。使用旧 Mod 时，须更新 JAR 并重启目标实例后才能执行脚本。
+产物为 `target/release/minecraft-mcp` 和 `mod/build/minecraft-agent.jar`。Python 构建脚本从实例清单组装类路径，使用 JDK 自带的 `javac` 和 `jar`，运行时依赖游戏和 Loader。将 Mod JAR 复制到目标 Fabric 实例实际使用的 `mods/`，重启实例。新版 MCP 在发送输入前检查 Mod 是否声明支持 `max_ticks`。脚本使用变量、带参函数、返回值或打印时，再检查 `input_values`。遇到缺失能力的提示，更新 JAR 并重启目标实例。
 
 ## 连接
 
@@ -66,6 +66,8 @@ python3 tests/game/run.py /absolute/game-root/versions/26.3-Fabric/26.3-Fabric.j
 ```
 
 该测试在项目 `.tmp/` 内创建新实例和存档，构建正式 Mod 与独立的测试观察 Mod，并通过正式 Rust MCP 提交脚本。文本用例按美式英语键盘布局核对新世界名称和聊天框的实际内容。观察端从玩家的 `KeyboardInput.tick` 结果读取前进、跳跃和左移，从原版事件入口记录鼠标及键盘的按下和释放，并核对游戏截图与服务端的箱子及物品归属。日志与每段 END 的图片保存在测试打印的实例目录中。
+
+变量专项可在该命令中加入 `--input-values`。用例覆盖正式 stdio 返回、整拍求值失败、按键及队列恢复、事件值、跨拍赋值和日志归属。
 
 添加 `--world-transitions` 可单独验证创建、保存退出、重开存档与原版确认界面。`--transition-delays` 还在临时实例中延迟服务器启动和停止，验证取消、30 秒后观察加载帧和没有可用帧时的错误返回。
 

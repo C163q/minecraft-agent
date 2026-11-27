@@ -87,8 +87,9 @@ def exercise_world_transitions(work, log, play, rpc, block, inspect, delays=None
     ordinary(send("Key(left_control) Key(a)", "Key(t)", "Key(e)", "Key(s)", "Key(t)", "Key(a)", ticks=6))
     assert fixture("flat") == "testa"
     move("button selectWorld.create")
-    created = send("Mouse(left)", ticks=1, max_ticks=1, image="transition-created", world="paused")
+    created = send('Print("enter")', "Mouse(left)", ticks=1, max_ticks=1, image="transition-created", world="paused")
     transition(created, "enter", None)
+    assert created["stdout"] == "enter\n"
     marked = rpc("tools/call", {"name": "cursor_hint", "arguments": {
         "screenshot_id": created["screenshot_id"], "x": created["width"] // 2, "y": created["height"] // 2,
     }})

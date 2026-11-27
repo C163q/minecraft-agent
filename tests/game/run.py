@@ -34,7 +34,7 @@ def has_pause_icon(path):
     return False
 
 
-def exercise(client, work, log, codex_env, wait_ready, transitions_only=False, transition_delays=False):
+def exercise(client, work, log, codex_env, wait_ready, transitions_only=False, transition_delays=False, values_only=False):
     serial = 0
 
     def submit(method, params):
@@ -112,6 +112,10 @@ def exercise(client, work, log, codex_env, wait_ready, transitions_only=False, t
     (work / "name-done").touch()
     wait_ready("ready")
     assert inspect()["world"] == "unpaused"
+    from values import exercise_values
+    if values_only:
+        exercise_values(work, log, play, rpc, block, inspect)
+        return
     exercise_game(work, log, play, rpc, block, inspect)
     from pause_binding import observer_input
     play(block("Key(t)", "Wait(2)", "Key(b)", "Key(left_shift) Key(c)"), 5, "chat-text")
@@ -241,6 +245,7 @@ def exercise(client, work, log, codex_env, wait_ready, transitions_only=False, t
     exercise_functions(work, log, play, rpc, block, inspect)
     from imports import exercise_imports
     exercise_imports(work, play, rpc, block, inspect)
+    exercise_values(work, log, play, rpc, block, inspect)
     exercise_action_events(work, log, play, rpc, block, inspect)
     from events import exercise_events
     exercise_events(work, log, play, rpc, block, inspect, codex_env)
@@ -254,6 +259,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("profile", type=Path)
     suite = parser.add_mutually_exclusive_group()
+    suite.add_argument("--input-values", action="store_true", help="only verify script values across the game and MCP")
     suite.add_argument("--codex", action="store_true", help="also verify the image and aim in a live Codex CLI session")
     suite.add_argument("--world-transitions", action="store_true", help="only verify single-player save transitions")
     suite.add_argument("--transition-delays", action="store_true", help="verify save transitions with timeout and cancellation")
@@ -276,8 +282,9 @@ def main():
         subprocess.run(["java", "-cp", classes, "mcagent.MovementTest"], check=True)
         queue_cp = os.pathsep.join([str(mods / "minecraft-agent.jar"), cp])
         subprocess.run(["javac", "--release", "25", "-proc:none", "-cp", queue_cp, "-d", classes,
-                        root / "tests/queue/InputQueueTest.java"], check=True)
-        subprocess.run(["java", "-cp", os.pathsep.join([str(classes), queue_cp]), "mcagent.InputQueueTest"], check=True)
+                        root / "tests/queue/InputQueueTest.java", root / "tests/queue/ScriptValuesTest.java"], check=True)
+        for test in ("mcagent.InputQueueTest", "mcagent.ScriptValuesTest"):
+            subprocess.run(["java", "-cp", os.pathsep.join([str(classes), queue_cp]), test], cwd=work, check=True)
     subprocess.run(["cargo", "build", "--offline", "--bin", "minecraft-mcp"], cwd=root, check=True)
     (work / "options.txt").write_text("onboardAccessibility:false\npauseOnLostFocus:false\nrenderDistance:4\nsimulationDistance:5\n")
     if transitions_only:
@@ -304,7 +311,7 @@ def main():
                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
             try:
                 exercise(client, work, log, env if args.codex else None, wait_ready,
-                         transitions_only, args.transition_delays)
+                         transitions_only, args.transition_delays, args.input_values)
             finally:
                 client.stdin.close()
                 try:
