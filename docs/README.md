@@ -34,3 +34,4 @@
 - [暂停、手动继续与增量队列](superpowers/specs/2026-11-22-pause-queue.md)，[实施与验证](superpowers/plans/2026-11-22-pause-queue.md)
 - [输入事件的注册、触发与查询](superpowers/specs/2026-11-22-input-events-design.md)，[实施与验证](superpowers/plans/2026-11-22-input-events.md)
 - [玩家死亡与分轴碰撞事件](superpowers/specs/2026-11-22-death-collision-events.md)
+- [输入脚本的函数与提前返回](superpowers/specs/2026-11-27-input-functions-design.md)
