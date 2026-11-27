@@ -143,6 +143,13 @@ fn wire_actions(actions: &Keys) -> BTreeMap<String, &'static str> {
 }
 
 impl Script {
+    /// Source of a key sent for game-side validation in a multi-file submission.
+    pub fn key_location(&self, key: &str) -> Option<(&str, usize)> {
+        self.import_keys
+            .get(key)
+            .map(|(source, line)| (source.as_str(), *line))
+    }
+
     pub fn compile(&self, persistent: BTreeSet<String>) -> DispatchProgram {
         let mut keys = BTreeMap::new();
         let mut keyboard = Keyboard {
@@ -160,6 +167,10 @@ impl Script {
                 )
             })
             .collect();
+        // Imported entry blocks are checked even though their runs are never dispatched.
+        for (key, (_, line)) in &self.import_keys {
+            keys.insert(key.clone(), *line);
+        }
         DispatchProgram {
             runs,
             functions,

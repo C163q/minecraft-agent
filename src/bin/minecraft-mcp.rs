@@ -4,7 +4,7 @@ mod hints;
 #[path = "minecraft-mcp/queue.rs"]
 mod queue;
 
-use minecraft_input::{DispatchProgram, FunctionControl, KeyRun, ScriptSource};
+use minecraft_input::{DispatchProgram, FunctionControl, KeyRun, Script, ScriptSource};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -239,7 +239,21 @@ fn play(args: &Value, call: &Mutex<Call>) -> Result<Value> {
     }
     serde_json::to_writer(reader.get_mut(), &request)?;
     reader.get_mut().write_all(b"\n")?;
-    stop_result(&receive(&mut reader)?, include_screenshot)
+    let reply = receive(&mut reader).map_err(|error| locate_key_error(&script, error))?;
+    stop_result(&reply, include_screenshot)
+}
+
+// The mod validates every key before queue.submit. The existing wire error
+// identifies the key by name, which also identifies its source in this submission.
+fn locate_key_error(script: &Script, error: Box<dyn Error>) -> Box<dyn Error> {
+    let message = error.to_string();
+    if let Some((prefix, key)) = message.rsplit_once(": unknown keyboard key: ")
+        && let Some((source, line)) = script.key_location(key)
+        && prefix == format!("java.lang.IllegalArgumentException: line {line}")
+    {
+        return format!("{source}: line {line}: unknown keyboard key: {key}").into();
+    }
+    error
 }
 
 fn stop_result(reply: &Value, include_screenshot: bool) -> Result<Value> {
@@ -360,7 +374,50 @@ fn main() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use minecraft_input::Script;
+
+    #[test]
+    fn imported_demo_keys_are_validated_without_dispatching_its_entry() {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp =
+            std::env::temp_dir().join(format!("mc-import-wire-{}-{timestamp}", std::process::id()));
+        std::fs::create_dir(&temp).unwrap();
+        let library = temp.join("movement.mcinput");
+        std::fs::write(
+            &library,
+            "BEGIN\nON(Hurt)\nBEGIN\nKey(no_such_key)\nEND\nEND",
+        )
+        .unwrap();
+        let source = ScriptSource::Inline("IMPORT \"movement.mcinput\"\nBEGIN\nWait(1)\nEND");
+        let script = source.load(&temp).unwrap();
+        let wire = encode_program(
+            script.compile(Default::default()),
+            &json!({"pause_queue":true}),
+            50.,
+        )
+        .unwrap();
+        assert_eq!(wire["keys"]["no_such_key"], 4);
+        assert_eq!(wire["runs"].as_array().unwrap().len(), 1);
+        assert_eq!(wire["runs"][0]["source"], "Wait(1)");
+        let error = locate_key_error(
+            &script,
+            "java.lang.IllegalArgumentException: line 4: unknown keyboard key: no_such_key".into(),
+        );
+        assert!(
+            error
+                .to_string()
+                .ends_with("movement.mcinput: line 4: unknown keyboard key: no_such_key")
+        );
+        let unrelated = "java.io.IOException: cannot write path: unknown keyboard key: no_such_key";
+        assert_eq!(
+            locate_key_error(&script, unrelated.into()).to_string(),
+            unrelated
+        );
+        std::fs::remove_file(&library).unwrap();
+        std::fs::remove_dir(&temp).unwrap();
+    }
 
     #[test]
     fn text_only_stop_requires_valid_status_and_skips_legacy_images() {

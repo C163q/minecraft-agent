@@ -1,4 +1,6 @@
-use std::{collections::BTreeMap, error::Error, fmt, fs, io, path::Path};
+use std::{collections::BTreeMap, error::Error, fmt, io, path::Path};
+
+mod imports;
 
 /// Select exactly one source. Relative paths are resolved against the caller's base.
 pub enum ScriptSource<'a> {
@@ -8,13 +10,7 @@ pub enum ScriptSource<'a> {
 
 impl ScriptSource<'_> {
     pub fn load(self, base: &Path) -> io::Result<Script> {
-        let parse = |text: &str| {
-            Script::parse(text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-        };
-        match self {
-            Self::Inline(text) => parse(text),
-            Self::Path(path) => parse(&fs::read_to_string(base.join(path))?),
-        }
+        imports::load(self, base).map_err(Into::into)
     }
 }
 
@@ -87,6 +83,21 @@ fn next_command(code: &str) -> Result<(&str, &str, &str), String> {
         }
     }
     Err(format!("missing closing ')' in {name}"))
+}
+
+fn declaration<'a>(code: &'a str, name: &str) -> Option<&'a str> {
+    code.strip_prefix(name)
+        .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+}
+
+fn quoted_path(arguments: &str) -> Option<(String, &str)> {
+    let arguments = arguments.trim_start();
+    let mut strings = serde_json::Deserializer::from_str(arguments).into_iter::<String>();
+    let path = strings
+        .next()
+        .and_then(Result::ok)
+        .filter(|p| !p.is_empty() && !p.contains('\0'))?;
+    Some((path, &arguments[strings.byte_offset()..]))
 }
 
 fn record_action(
@@ -208,14 +219,8 @@ impl Row {
             return Ok(row);
         }
         if let Some(args) = code.strip_prefix("ScreenShot(") {
-            let mut strings =
-                serde_json::Deserializer::from_str(args.trim_start()).into_iter::<String>();
-            let path = strings
-                .next()
-                .and_then(Result::ok)
-                .filter(|p| !p.is_empty() && !p.contains('\0'))
-                .ok_or("ScreenShot expects a quoted file path")?;
-            let rest = args.trim_start()[strings.byte_offset()..]
+            let (path, rest) = quoted_path(args).ok_or("ScreenShot expects a quoted file path")?;
+            let rest = rest
                 .trim_start()
                 .strip_prefix(')')
                 .ok_or("expected ')' after screenshot path")?;
@@ -300,66 +305,13 @@ impl Row {
 pub struct Script {
     pub(crate) rows: Vec<Row>,
     pub(crate) functions: BTreeMap<String, Vec<Row>>,
+    pub(crate) import_keys: BTreeMap<String, (String, usize)>,
 }
 
 impl Script {
-    /// Validate the entry block and every function before making any input available.
+    /// Load an inline script, resolving relative imports against the working directory.
     pub fn parse(text: &str) -> Result<Self, ParseError> {
-        let eof = text.lines().count() + 1;
-        let mut source = text.lines().enumerate().filter_map(|(index, raw)| {
-            if raw.trim_start().starts_with("//") {
-                return None;
-            }
-            let code = if raw.trim_start().starts_with("ScreenShot(") {
-                raw.trim()
-            } else {
-                raw.split_once("//")
-                    .map_or(raw, |(prefix, _)| prefix)
-                    .trim()
-            };
-            Some((index + 1, code))
-        });
-        let mut functions = BTreeMap::new();
-        let rows = loop {
-            let (line, code) = source
-                .next()
-                .ok_or_else(|| parse_error(eof, "missing BEGIN"))?;
-            if code.is_empty() {
-                continue;
-            }
-            if code == "BEGIN" {
-                break parse_block(&mut source, eof, true)?;
-            }
-            let declaration = code
-                .strip_prefix("FUNCTION")
-                .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
-                .ok_or_else(|| parse_error(line, "expected BEGIN"))?;
-            let name =
-                function_name(declaration.trim()).map_err(|message| parse_error(line, message))?;
-            if functions.contains_key(name) {
-                return Err(parse_error(line, format!("duplicate function ${name}")));
-            }
-            expect_begin(&mut source, eof, "FUNCTION")?;
-            functions.insert(name.to_owned(), parse_block(&mut source, eof, true)?);
-        };
-        if let Some((line, _)) = source.find(|(_, code)| !code.is_empty()) {
-            return Err(parse_error(line, "unexpected input after END"));
-        }
-        if let Some((line, name)) = functions
-            .values()
-            .chain(std::iter::once(&rows))
-            .flat_map(|body| block_rows(body))
-            .filter_map(|row| match &row.control {
-                Some(FunctionControl::Call(name)) if !functions.contains_key(name) => {
-                    Some((row.line, name))
-                }
-                _ => None,
-            })
-            .min_by_key(|(line, _)| *line)
-        {
-            return Err(parse_error(line, format!("undefined function ${name}")));
-        }
-        Ok(Self { rows, functions })
+        imports::load(ScriptSource::Inline(text), Path::new(".")).map_err(Into::into)
     }
 
     pub(crate) fn uses_functions(&self) -> bool {
@@ -406,6 +358,9 @@ fn parse_block<'a>(
             return Ok(rows);
         }
         let error = |message| parse_error(line, message);
+        if declaration(code, "IMPORT").is_some() {
+            return Err(error(imports::IMPORT_POSITION.into()));
+        }
         if code.starts_with("ON(") {
             if !allow_listeners {
                 return Err(error("ON cannot be nested inside an event handler".into()));
