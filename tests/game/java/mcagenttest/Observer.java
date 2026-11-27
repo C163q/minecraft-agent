@@ -89,6 +89,11 @@ public final class Observer implements ClientModInitializer {
                 Files.delete(request);
                 return;
             }
+            if (command[0].equals("world-transition")) {
+                mc.submit(() -> WorldTransitionFixture.apply(mc, command[1], command.length > 2 ? command[2] : "")).join();
+                Files.delete(request);
+                return;
+            }
             if (command[0].equals("motion") || command[0].equals("view")) {
                 mouseInput(mc, command);
                 Files.delete(request);
@@ -194,6 +199,17 @@ public final class Observer implements ClientModInitializer {
             try {
                 await(() -> mc.submit(() -> mc.gui != null && mc.gui.screen() instanceof TitleScreen
                     && mc.gui.overlay() == null).join());
+                if (Files.exists(Path.of("world-transitions"))) {
+                    await(() -> mc.submit(mc::isWindowActive).join());
+                    recording = true;
+                    Files.createFile(Path.of("title-ready"));
+                    await(() -> {
+                        observerInput(mc);
+                        measureWorld = Files.exists(Path.of("measure-world"));
+                        return Files.exists(Path.of("done"));
+                    }, 450);
+                    return;
+                }
                 Files.createFile(Path.of("title-ready"));
                 await(() -> Files.exists(Path.of("title-done")) || Files.exists(Path.of("done")));
                 if (Files.exists(Path.of("done"))) return;

@@ -9,11 +9,22 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.*;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(IntegratedServer.class)
 abstract class Container {
     @Unique private boolean carryingDiamond;
     @Unique private boolean inChest;
+
+    @Inject(method="initServer", at=@At("HEAD"))
+    private void delayStartup(CallbackInfoReturnable<Boolean> ci) throws java.io.IOException {
+        mcagenttest.TransitionDelay.hold("enter");
+    }
+
+    @Inject(method="stopServer", at=@At("HEAD"))
+    private void delayShutdown(CallbackInfo ci) throws java.io.IOException {
+        mcagenttest.TransitionDelay.hold("leave");
+    }
 
     @Inject(method="tickServer", at=@At("RETURN"))
     private void checkItem(BooleanSupplier budget, CallbackInfo ci) {

@@ -52,6 +52,19 @@ END
 
 原版菜单本身暂停世界时，返回的 `world` 为 `not_needed`。在菜单内执行的显式 `PAUSE` 会保留，关闭菜单后可用 F8 或新块继续。普通 `END` 若在原版菜单内返回，则关闭该菜单可恢复正常运行。
 
-返回的 `ticks` 是本次工具调用实际走过的输入拍数。`pause_reason` 为 `pause`、`hotkey` 或 `end`，分别对应脚本暂停指令、快捷键和本次块的段尾。
+返回的 `ticks` 是本次工具调用实际走过的输入拍数。普通停止的 `pause_reason` 为 `pause`、`hotkey` 或 `end`，分别对应脚本暂停指令、快捷键和本次块的段尾。
 
 事件处理块暂停时，返回结果还包括[实际执行暂停的监听](events.md)。
+
+## 进入存档与保存退出
+
+脚本从菜单打开单人存档、确认创建新世界或点击保存退出时，该次 `input_script` 返回 `pause_reason: "world_changed"`。点击可以是最后一拍。Mod 清空旧队列、函数、监听和鼠标移动，释放脚本保持的键与按钮；切换前已命中的 `events` 随结果返回。触发切换的输入拍计入 `ticks`，加载和保存期间的等待不计拍。
+
+| 返回字段 | 用法 |
+| --- | --- |
+| `transition.direction` | `enter` 为进入存档，`leave` 为保存退出 |
+| `transition.input_cleared` | `true` 表示旧脚本输入已经清理，下一次提交从新状态开始 |
+| `transition.status` | `completed` 为已到达目的地；`needs_input` 时查看当前界面并提交新的选择；`cancelled` 或 `failed` 表示原版取消或未能完成 |
+| `screen`、`world` | 当前帧的可见界面类型与暂停状态。正常进入世界返回 `null`、`paused`；保存退出到标题页返回 `TitleScreen`、`not_needed` |
+
+切换默认附上这一帧的截图，`include_screenshot: false` 可只取状态。等待 30 秒仍在加载或保存时，`transition.status` 返回 `in_progress`。之后可用 [inspect_game](../inspect-game.md) 查看进展；这次已结束的调用不会在将来暂停游戏。如果渲染或像素读回一直没有交付有效帧，Mod 在切换开始后 35 秒结束观察并返回错误。连接中断仍按通信错误处理。

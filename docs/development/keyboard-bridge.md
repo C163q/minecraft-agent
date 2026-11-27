@@ -49,6 +49,8 @@ MINECRAFT_AGENT_SOCKET = "/run/user/1000/minecraft-agent.sock"
 
 鼠标的逐拍合成由 [Movement](../../mod/src/main/java/mcagent/Movement.java) 处理，[MouseDispatch](../../mod/src/main/java/mcagent/MouseDispatch.java) 在指令生效时换算单位并调用原版鼠标事件。游戏端在停止帧渲染时采集相机信息，Rust MCP 将其与原始 PNG 一起保存，供 [cursor_hint](../input-script/cursor-hint.md) 使用。GUI 和外部 PNG 也可标点。
 
+正常菜单操作触发进出单人存档时，[Playback](../../mod/src/main/java/mcagent/Playback.java) 终止这一拍剩余的键鼠派发，保留请求及已记录的事件。[WorldOpenTransition](../../mod/src/main/java/mcagent/WorldOpenTransition.java) 跟踪原版打开存档的回调与确认界面，[WorldTransition](../../mod/src/main/java/mcagent/WorldTransition.java) 将结果限定到发起请求。保存时原版可能只绘制过渡帧；在实际绘制后采样可避免依赖被清空的客户端任务队列。正常进入后仍需内置服务器的暂停确认。[返回字段](../input-script/pause.md#进入存档与保存退出)
+
 `inspect_input` 在游戏线程一次性复制键和按钮的实际脚本保持状态、活动位移与限速。它通过独立的游戏只读请求读取状态，和脚本提交共用实例的串行连接。Rust MCP 在主机端对不可变队列快照分页或导出文件。MCP 返回相同的 JSON 文本及 `structuredContent`。较旧的 Mod 缺少查询能力时，MCP 会提示更新。字段和使用示例见[查询当前输入状态](../input-script/inspect.md)。
 
 `inspect_game` 共用串行连接。Mod 在握手中声明同名能力，[GameInspection](../../mod/src/main/java/mcagent/GameInspection.java) 在一次客户端绘制完成后采样 `Minecraft.hitResult`、当前界面和玩家字段。需要图片时，在同一帧读回渲染目标并记录相机。Rust 用现有图片缓存登记该帧，默认查询只传递状态。处于运行中的世界按客户端已经收到的更新采样，查询独立于脚本暂停时的服务端同步。[状态字段与示例](../inspect-game.md)
@@ -64,6 +66,8 @@ python3 tests/game/run.py /absolute/game-root/versions/26.3-Fabric/26.3-Fabric.j
 ```
 
 该测试在项目 `.tmp/` 内创建新实例和存档，构建正式 Mod 与独立的测试观察 Mod，并通过正式 Rust MCP 提交脚本。文本用例按美式英语键盘布局核对新世界名称和聊天框的实际内容。观察端从玩家的 `KeyboardInput.tick` 结果读取前进、跳跃和左移，从原版事件入口记录鼠标及键盘的按下和释放，并核对游戏截图与服务端的箱子及物品归属。日志与每段 END 的图片保存在测试打印的实例目录中。
+
+添加 `--world-transitions` 可单独验证创建、保存退出、重开存档与原版确认界面。`--transition-delays` 还在临时实例中延迟服务器启动和停止，验证取消、30 秒后观察加载帧和没有可用帧时的错误返回。
 
 加上 `--codex` 可在同一测试世界运行独立 Codex CLI 会话。它从语法参考查找写法，通过正式 MCP 的图片选中红色方块，使用返回的角度瞄准，再观察停止帧。需要已配置的 Codex CLI 和模型访问权限。可以通过 `MINECRAFT_AGENT_CODEX_MODEL` 选择模型。测试把该会话的图片和工具调用保存在当次测试目录的 `codex-mouse/`。
 

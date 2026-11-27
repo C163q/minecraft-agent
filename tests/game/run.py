@@ -34,7 +34,7 @@ def has_pause_icon(path):
     return False
 
 
-def exercise(client, work, log, codex_env, wait_ready):
+def exercise(client, work, log, codex_env, wait_ready, transitions_only=False, transition_delays=False):
     serial = 0
 
     def submit(method, params):
@@ -62,8 +62,8 @@ def exercise(client, work, log, codex_env, wait_ready):
     option = tools["input_script"]["inputSchema"]["properties"]["include_screenshot"]
     assert option["type"] == "boolean" and option["default"] is True
 
-    def play(args, expected_ticks, name, world="paused"):
-        reply = rpc("tools/call", {"name": "input_script", "arguments": args})
+    def play(args, expected_ticks, name, world="paused", timeout=25):
+        reply = rpc("tools/call", {"name": "input_script", "arguments": args}, timeout)
         assert not reply.get("isError"), reply["content"][0]
         blocks = reply["content"]
         assert blocks[0]["type"] == "text"
@@ -97,6 +97,11 @@ def exercise(client, work, log, codex_env, wait_ready):
         return state
 
     inspect_title(rpc, tools["inspect_game"])
+    if transitions_only:
+        from world_transitions import exercise_world_transitions
+        delays = (submit, receive, client) if transition_delays else None
+        exercise_world_transitions(work, log, play, rpc, block, inspect, delays)
+        return
     (work / "title-done").touch()
     wait_ready("name-ready")
     play(block("Key(left_control) Key(a)", "Key(backspace)", "Key(left_shift) Key(a)", "Key(b)",
@@ -238,13 +243,18 @@ def exercise(client, work, log, codex_env, wait_ready):
     from events import exercise_events
     exercise_events(work, log, play, rpc, block, inspect, codex_env)
     exercise_game_exit(work, rpc)
+    from world_transitions import exercise_world_transitions
+    exercise_world_transitions(work, log, play, rpc, block, inspect)
     print("PASS: eight ticks, handoff, remapping, invalid input, native pause, catch-up ticks, cancellation and END images.")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("profile", type=Path)
-    parser.add_argument("--codex", action="store_true", help="also verify the image and aim in a live Codex CLI session")
+    suite = parser.add_mutually_exclusive_group()
+    suite.add_argument("--codex", action="store_true", help="also verify the image and aim in a live Codex CLI session")
+    suite.add_argument("--world-transitions", action="store_true", help="only verify single-player save transitions")
+    suite.add_argument("--transition-delays", action="store_true", help="verify save transitions with timeout and cancellation")
     args = parser.parse_args()
     profile = args.profile.resolve()
     cp = game_classpath(profile)
@@ -252,20 +262,24 @@ def main():
     tmp.mkdir(exist_ok=True)
     work = Path(tempfile.mkdtemp(dir=tmp, prefix="input-"))
     print(work, flush=True)
-    classes = work / "movement-classes"
-    classes.mkdir()
-    subprocess.run(["javac", "--release", "25", "-d", classes, root / "mod/src/main/java/mcagent/Movement.java",
-                    root / "tests/mouse/MovementTest.java"], check=True)
-    subprocess.run(["java", "-cp", classes, "mcagent.MovementTest"], check=True)
+    transitions_only = args.world_transitions or args.transition_delays
     mods = work / "mods"
     build_jar(root / "mod/src/main", mods / "minecraft-agent.jar", cp)
     build_jar(root / "tests/game", mods / "observer.jar", cp)
-    queue_cp = os.pathsep.join([str(mods / "minecraft-agent.jar"), cp])
-    subprocess.run(["javac", "--release", "25", "-proc:none", "-cp", queue_cp, "-d", classes,
-                    root / "tests/queue/InputQueueTest.java"], check=True)
-    subprocess.run(["java", "-cp", os.pathsep.join([str(classes), queue_cp]), "mcagent.InputQueueTest"], check=True)
+    if not transitions_only:
+        classes = work / "movement-classes"
+        classes.mkdir()
+        subprocess.run(["javac", "--release", "25", "-d", classes, root / "mod/src/main/java/mcagent/Movement.java",
+                        root / "tests/mouse/MovementTest.java"], check=True)
+        subprocess.run(["java", "-cp", classes, "mcagent.MovementTest"], check=True)
+        queue_cp = os.pathsep.join([str(mods / "minecraft-agent.jar"), cp])
+        subprocess.run(["javac", "--release", "25", "-proc:none", "-cp", queue_cp, "-d", classes,
+                        root / "tests/queue/InputQueueTest.java"], check=True)
+        subprocess.run(["java", "-cp", os.pathsep.join([str(classes), queue_cp]), "mcagent.InputQueueTest"], check=True)
     subprocess.run(["cargo", "build", "--offline", "--bin", "minecraft-mcp"], cwd=root, check=True)
     (work / "options.txt").write_text("onboardAccessibility:false\npauseOnLostFocus:false\nrenderDistance:4\nsimulationDistance:5\n")
+    if transitions_only:
+        (work / "world-transitions").touch()
     java = ["java", "-Xmx2G", "-XX:ActiveProcessorCount=4", "--enable-native-access=ALL-UNNAMED",
             "--add-exports", "java.base/jdk.internal.misc=ALL-UNNAMED", "-cp", cp,
             "net.fabricmc.loader.impl.launch.knot.KnotClient", "--username", "LocalProbe", "--version", "26.3",
@@ -287,7 +301,8 @@ def main():
             client = subprocess.Popen([root / "target/debug/minecraft-mcp"], env=env, cwd=work,
                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
             try:
-                exercise(client, work, log, env if args.codex else None, wait_ready)
+                exercise(client, work, log, env if args.codex else None, wait_ready,
+                         transitions_only, args.transition_delays)
             finally:
                 client.stdin.close()
                 try:

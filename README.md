@@ -56,6 +56,8 @@ printf 'MINECRAFT_AGENT_SOCKET=%s\n' "$socket_path"
 
 例如让模型调用 `inspect_game({})` 查看面前的牛是否被草挡住。命中草时，`target` 包含方块 ID、坐标和命中面；命中牛时会给出 `minecraft:cow` 和实体 ID。查询保持游戏当前的运行或暂停状态。[游戏状态字段](docs/inspect-game.md)
 
+模型通过菜单进入单人存档或保存退出时，`input_script` 会返回切换状态、实际界面和旧输入的清理结果。进入存档后，模型从新世界的暂停帧继续操作。[进出存档的返回结果](docs/input-script/pause.md#进入存档与保存退出)
+
 编写脚本时按需查阅[脚本语法参考](docs/input-script/README.md)。手动配置 MCP、调整鼠标限速和实机验证见[开发文档](docs/development/keyboard-bridge.md)。
 
 ## 许可证

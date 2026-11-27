@@ -25,6 +25,7 @@ abstract class Frames {
 
     @Inject(method="renderFrame", at=@At("HEAD"))
     private void closeTransientMenu(CallbackInfo ci) throws IOException {
+        while (mcagenttest.TransitionDelay.blockDraw) LockSupport.parkNanos(10_000_000);
         var mc = (Minecraft)(Object)this;
         if (!mc.isPaused() && mc.gui.screen() instanceof net.minecraft.client.gui.screens.DeathScreen
                 && Files.deleteIfExists(Path.of("respawn-after-resume"))) mc.player.respawn();

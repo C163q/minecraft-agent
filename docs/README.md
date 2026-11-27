@@ -39,4 +39,4 @@
 - [输入脚本的 IMPORT 设计](superpowers/specs/2026-11-27-input-import-design.md)，[实施与验证](superpowers/plans/2026-11-27-input-import.md)
 - [查询当前游戏状态](superpowers/specs/2026-11-27-inspect-game-design.md)，[实施与验证](superpowers/plans/2026-11-27-inspect-game.md)
 - [玩家动作事件与触发结果](superpowers/specs/2026-11-27-player-action-events.md)，[实施与验证](superpowers/plans/2026-11-27-player-action-events.md)
-- [单人存档进出时的输入结果](superpowers/specs/2026-11-27-world-transition-design.md)
+- [单人存档进出时的输入结果](superpowers/specs/2026-11-27-world-transition-design.md)，[实施与验证](superpowers/plans/2026-11-27-world-transition.md)
