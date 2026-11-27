@@ -132,6 +132,7 @@ fn published_examples_match_the_documented_held_keys() {
         &[&["w"], &["w", "space"], &[], &[], &["a"]],
         &[&["w"], &[]],
         &[&["w"], &["w"], &["w"], &["w"], &["w"], &["w"], &["w"], &[]],
+        &[&["a", "left_shift"], &["b"]],
         &[&["space"], &[]],
     ];
     assert_eq!(examples.len(), expected.len());
@@ -230,4 +231,72 @@ fn player_death_and_axis_collisions_compile_as_distinct_listeners() {
         assert_eq!(program.runs[0].handler.as_ref().unwrap().0, name);
         assert_eq!(program.runs[0].ticks, 0);
     }
+}
+
+#[test]
+fn function_diagnostics_include_the_original_line() {
+    for (source, line, detail) in [
+        (
+            "FUNCTION $check\nBEGIN\nEND\nFUNCTION $check\nBEGIN\nEND\nBEGIN\nEND",
+            4,
+            "$check",
+        ),
+        ("FUNCTION $1bad\nBEGIN\nEND\nBEGIN\nEND", 1, "$1bad"),
+        (
+            "FUNCTION $unused\nBEGIN\nON(Hurt)\nBEGIN\n$missing()\nEND\nEND\nBEGIN\nEND",
+            5,
+            "$missing",
+        ),
+        (
+            "FUNCTION $unused\nBEGIN\nKey(w) KeyRelease(w)\nEND\nBEGIN\nEND",
+            3,
+            "conflicting actions",
+        ),
+        (
+            "FUNCTION $unused\nBEGIN\nON(Hurt)\nBEGIN\nON(Hurt)\nBEGIN\nEND\nEND\nEND\nBEGIN\nEND",
+            5,
+            "ON",
+        ),
+        (
+            "FUNCTION $Check\nBEGIN\nEND\nBEGIN\n$check()\nEND",
+            5,
+            "$check",
+        ),
+        ("BEGIN\n$check(1)\nEND", 2, "$check"),
+        ("BEGIN\n$check() Key(w)\nEND", 2, "$check"),
+        ("BEGIN\nRETURN PAUSE\nEND", 2, "RETURN"),
+        ("BEGIN\nEND\nFUNCTION $check\nBEGIN\nEND", 3, "END"),
+    ] {
+        let error = Script::parse(source).unwrap_err();
+        assert_eq!(error.line, line, "{source}");
+        assert!(error.message.contains(detail), "{error}");
+    }
+}
+
+#[test]
+#[should_panic(expected = "requires game playback")]
+fn fixed_tick_preview_explicitly_rejects_return() {
+    let script = Script::parse("BEGIN\nRETURN\nKey(w)\nEND").unwrap();
+    Keyboard::default().play(&script).count();
+}
+
+#[test]
+fn fallible_fixed_tick_preview_rejects_function_scripts_without_advancing_keyboard() {
+    let script =
+        Script::parse("FUNCTION $noop\nBEGIN\nEND\nBEGIN\n$noop()\nKeyPress(a)\nEND").unwrap();
+    let mut keyboard = Keyboard::default();
+    assert!(matches!(
+        keyboard.try_play(&script),
+        Err(minecraft_input::PreviewError)
+    ));
+    let plain = Script::parse("BEGIN\nWait(1)\nEND").unwrap();
+    assert!(
+        keyboard
+            .try_play(&plain)
+            .unwrap()
+            .next()
+            .unwrap()
+            .held
+            .is_empty()
+    );
 }

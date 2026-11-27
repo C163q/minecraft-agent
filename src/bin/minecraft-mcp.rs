@@ -4,10 +4,10 @@ mod hints;
 #[path = "minecraft-mcp/queue.rs"]
 mod queue;
 
-use minecraft_input::{DispatchProgram, ScriptSource};
+use minecraft_input::{DispatchProgram, FunctionControl, KeyRun, ScriptSource};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env,
     error::Error,
     io::{self, BufRead, BufReader, Write},
@@ -59,34 +59,50 @@ fn max_mouse_speed() -> Result<f64> {
     Ok(speed)
 }
 
-fn check_game_support(program: &DispatchProgram, hello: &Value) -> Result<()> {
-    if program
+// A listener body cannot declare another listener directly. Called functions
+// are visited from the function table without following the call graph.
+fn program_runs(program: &DispatchProgram) -> impl Iterator<Item = &KeyRun> + Clone {
+    program
         .runs
         .iter()
-        .any(|r| r.handler.is_some() || r.clear_listeners || r.screenshot.is_some())
-        && hello["input_events"] != true
-    {
-        return Err("input events and explicit screenshots require an updated Fabric mod".into());
+        .chain(program.functions.values().flatten())
+        .flat_map(|run| std::iter::once(run).chain(run.handler.iter().flat_map(|(_, body)| body)))
+}
+
+fn check_game_support(program: &DispatchProgram, hello: &Value) -> Result<bool> {
+    let runs = program_runs(program);
+    let uses_functions = !program.functions.is_empty() || runs.clone().any(|r| r.control.is_some());
+    if uses_functions && (hello["input_functions"] != true || hello["pause_queue"] != true) {
+        return Err("FUNCTION and RETURN require an updated Fabric mod with input_functions and pause_queue".into());
     }
-    for (event, _) in program.runs.iter().filter_map(|run| run.handler.as_ref()) {
-        let supported = match hello.get("event_names") {
-            Some(names) => names
-                .as_array()
-                .is_some_and(|names| names.iter().any(|name| name.as_str() == Some(event))),
-            None => matches!(event.as_str(), "Hurt" | "HpLost"),
-        };
-        if !supported {
-            return Err(format!("installed Fabric mod does not support ON({event}); update the mod and restart Minecraft").into());
+    for run in runs {
+        let line = run.line;
+        if (run.handler.is_some() || run.clear_listeners || run.screenshot.is_some())
+            && hello["input_events"] != true
+        {
+            return Err(format!(
+                "line {line}: input events and explicit screenshots require an updated Fabric mod"
+            )
+            .into());
+        }
+        if let Some((event, _)) = &run.handler {
+            let supported = match hello.get("event_names") {
+                Some(names) => names
+                    .as_array()
+                    .is_some_and(|names| names.iter().any(|name| name.as_str() == Some(event))),
+                None => matches!(event.as_str(), "Hurt" | "HpLost"),
+            };
+            if !supported {
+                return Err(format!("line {line}: installed Fabric mod does not support ON({event}); update the mod and restart Minecraft").into());
+            }
+        }
+        let needs_mouse =
+            run.wait_mouse || run.clear || !run.moves.is_empty() || !run.buttons.is_empty();
+        if needs_mouse && hello["mouse_input"] != true {
+            return Err(format!("line {line}: installed Fabric mod only supports keyboard input; update the mod and restart Minecraft").into());
         }
     }
-    let needs_mouse = program
-        .runs
-        .iter()
-        .any(|r| r.wait_mouse || r.clear || !r.moves.is_empty() || !r.buttons.is_empty());
-    if needs_mouse && hello["mouse_input"] != true {
-        return Err("installed Fabric mod only supports keyboard input; update the mod and restart Minecraft".into());
-    }
-    Ok(())
+    Ok(uses_functions)
 }
 
 fn connect_game(call: &Mutex<Call>) -> Result<(BufReader<UnixStream>, Value)> {
@@ -139,7 +155,7 @@ fn inspect_game(call: &Mutex<Call>) -> Result<Value> {
     Ok(state)
 }
 
-fn encode_runs(runs: Vec<minecraft_input::KeyRun>, queue_supported: bool) -> Result<Vec<Value>> {
+fn encode_runs(runs: Vec<KeyRun>, queue_supported: bool) -> Result<Vec<Value>> {
     runs.into_iter()
         .map(|r| -> Result<Value> {
             let mut run = json!({
@@ -161,13 +177,18 @@ fn encode_runs(runs: Vec<minecraft_input::KeyRun>, queue_supported: bool) -> Res
             if let Some(path) = r.screenshot {
                 run["screenshot"] = json!(std::path::absolute(path)?);
             }
+            match r.control {
+                Some(FunctionControl::Call(name)) => run["call"] = json!(name),
+                Some(FunctionControl::Return) => run["return"] = json!(true),
+                None => (),
+            }
             Ok(run)
         })
         .collect()
 }
 
 fn encode_program(program: DispatchProgram, hello: &Value, max_speed: f64) -> Result<Value> {
-    check_game_support(&program, hello)?;
+    let uses_functions = check_game_support(&program, hello)?;
     let queue_supported = hello["pause_queue"] == true;
     if !queue_supported && program.runs.iter().any(|r| r.pause) {
         return Err("PAUSE requires the pause_queue Fabric mod update; update the mod and restart Minecraft".into());
@@ -176,6 +197,14 @@ fn encode_program(program: DispatchProgram, hello: &Value, max_speed: f64) -> Re
     let mut request = json!({"keys":program.keys,"runs":runs,"persistent":program.persistent,"max_speed":max_speed});
     if queue_supported {
         request["queue_version"] = json!(1);
+    }
+    if uses_functions {
+        let functions = program
+            .functions
+            .into_iter()
+            .map(|(name, body)| Ok((name, encode_runs(body, queue_supported)?)))
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        request["functions"] = json!(functions);
     }
     Ok(request)
 }
@@ -426,6 +455,89 @@ mod tests {
             let program = script.compile(BTreeSet::new());
             assert_eq!(check_game_support(&program, &old).is_err(), needs_mouse);
             assert!(check_game_support(&program, &updated).is_ok());
+        }
+    }
+
+    #[test]
+    fn functions_are_encoded_as_zero_tick_controls_without_expanding_recursion() {
+        let program = Script::parse(concat!(
+            "FUNCTION $outer_1 // declaration\nBEGIN\n",
+            "ON(Hurt)\nBEGIN\n$INNER()\nRETURN // handler return\nEND\nEND\n",
+            "FUNCTION $INNER\nBEGIN\n$outer_1()\nRETURN\nEND\n",
+            "FUNCTION $Unused\nBEGIN\nKeyRelease(a)\n$Unused()\nEND\n",
+            "BEGIN\n$outer_1() // first call\nKey(a)\nEND"
+        ))
+        .unwrap()
+        .compile(Default::default());
+        let hello = json!({"pause_queue":true,"input_functions":true,"input_events":true});
+        let request = encode_program(program, &hello, 50.).unwrap();
+        assert_eq!(request["queue_version"], 1);
+        assert_eq!(request["keys"]["a"], 16);
+        let runs = request["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0]["source"], "$outer_1()");
+        assert_eq!(runs[0]["call"], "outer_1");
+        assert_eq!(runs[0]["ticks"], "0");
+        assert_eq!(runs[0]["line"], 20);
+        let handler = &request["functions"]["outer_1"][0];
+        assert_eq!(handler["line"], 3);
+        assert_eq!(handler["body"][0]["call"], "INNER");
+        assert_eq!(handler["body"][1]["return"], true);
+        assert_eq!(handler["body"][1]["line"], 6);
+        assert_eq!(handler["body"][1]["ticks"], "0");
+        assert_eq!(request["functions"]["INNER"][0]["call"], "outer_1");
+        assert_eq!(request["functions"]["INNER"][1]["return"], true);
+        assert_eq!(request["functions"]["Unused"][0]["line"], 16);
+        assert_eq!(request["functions"]["Unused"][1]["call"], "Unused");
+    }
+
+    #[test]
+    fn using_functions_or_return_requires_a_compatible_queue() {
+        for source in [
+            "FUNCTION $unused\nBEGIN\nEND\nBEGIN\nEND",
+            "BEGIN\nRETURN\nEND",
+            "BEGIN\nON(Hurt)\nBEGIN\nRETURN\nEND\nEND",
+        ] {
+            let script = Script::parse(source).unwrap();
+            for hello in [
+                json!({"input_events":true,"pause_queue":true}),
+                json!({"input_events":true,"input_functions":true}),
+            ] {
+                let error =
+                    encode_program(script.compile(Default::default()), &hello, 50.).unwrap_err();
+                assert!(error.to_string().contains("updated Fabric mod"), "{error}");
+            }
+        }
+        let hello = json!({"pause_queue":true,"input_functions":true});
+        let script = Script::parse("BEGIN\nRETURN\nEND").unwrap();
+        let request = encode_program(script.compile(Default::default()), &hello, 50.).unwrap();
+        assert_eq!(request["functions"], json!({}));
+        assert_eq!(request["runs"][0]["return"], true);
+        let script = Script::parse("BEGIN\nKey(w)\nEND").unwrap();
+        let hello = json!({"pause_queue":true});
+        let request = encode_program(script.compile(Default::default()), &hello, 50.).unwrap();
+        assert!(request.get("functions").is_none());
+        assert!(request["runs"][0].get("call").is_none());
+        assert!(request["runs"][0].get("return").is_none());
+    }
+
+    #[test]
+    fn unused_function_bodies_are_checked_against_game_capabilities() {
+        for (body, line, missing) in [
+            ("ON(Death)\nBEGIN\nEND", 3, "ON(Death)"),
+            ("ON(Hurt)\nBEGIN\nMouse(left)\nEND", 5, "keyboard input"),
+        ] {
+            let script =
+                Script::parse(&format!("FUNCTION $unused\nBEGIN\n{body}\nEND\nBEGIN\nEND"))
+                    .unwrap();
+            let hello = json!({"pause_queue":true,"input_events":true,"input_functions":true});
+            let error =
+                encode_program(script.compile(Default::default()), &hello, 50.).unwrap_err();
+            assert!(
+                error.to_string().contains(&format!("line {line}")),
+                "{error}"
+            );
+            assert!(error.to_string().contains(missing), "{error}");
         }
     }
 }

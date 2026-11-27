@@ -1,5 +1,9 @@
-use crate::parser::{KeyAction, Keys, Script};
-use std::collections::{BTreeMap, BTreeSet};
+use crate::parser::{FunctionControl, KeyAction, Keys, Row, Script};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct KeyFrame {
@@ -17,12 +21,42 @@ pub struct Keyboard {
     held: BTreeSet<String>,
 }
 
+/// The fixed-tick keyboard preview cannot evaluate function control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreviewError;
+
+impl fmt::Display for PreviewError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a script with FUNCTION or RETURN requires game playback")
+    }
+}
+
+impl Error for PreviewError {}
+
 impl Keyboard {
     /// Project the fixed ticks of a script onto the keyboard. Dynamic mouse waits
     /// depend on game state; this keyboard-only preview treats them as already idle.
     /// Game playback uses `Script::compile` to preserve those waits.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the script defines functions or contains `RETURN`. Use
+    /// [`Keyboard::try_play`] to handle unsupported scripts as an error.
+    #[track_caller]
     pub fn play<'a>(&'a mut self, script: &'a Script) -> impl Iterator<Item = KeyFrame> + 'a {
-        script
+        self.try_play(script)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Preview fixed ticks or report that the script requires game playback.
+    pub fn try_play<'a>(
+        &'a mut self,
+        script: &'a Script,
+    ) -> Result<impl Iterator<Item = KeyFrame> + 'a, PreviewError> {
+        if script.uses_functions() {
+            return Err(PreviewError);
+        }
+        Ok(script
             .rows
             .iter()
             .flat_map(|row| {
@@ -30,7 +64,7 @@ impl Keyboard {
                 let input = row.has_input().then_some((row.line, Some(&row.keys)));
                 waiting.chain(input)
             })
-            .map(|(line, keys)| self.step(line, keys))
+            .map(|(line, keys)| self.step(line, keys)))
     }
 
     fn step(&mut self, line: usize, keys: Option<&Keys>) -> KeyFrame {
@@ -79,11 +113,16 @@ pub struct KeyRun {
     pub clear: bool,
     pub line: usize,
     pub ticks: u64,
+    /// Full key state for legacy playback. The game queue applies `key_actions`.
     pub held: BTreeSet<String>,
+    pub control: Option<FunctionControl>,
 }
 
 pub struct DispatchProgram {
     pub runs: Vec<KeyRun>,
+    /// Function names without the leading `$`, mapped to their compiled bodies.
+    pub functions: BTreeMap<String, Vec<KeyRun>>,
+    /// Final key state for legacy playback. The game queue tracks held keys at runtime.
     pub persistent: BTreeSet<String>,
     /// Includes release-only names, so all bindings can be validated before playback.
     pub keys: BTreeMap<String, usize>,
@@ -105,85 +144,107 @@ fn wire_actions(actions: &Keys) -> BTreeMap<String, &'static str> {
 
 impl Script {
     pub fn compile(&self, persistent: BTreeSet<String>) -> DispatchProgram {
+        let mut keys = BTreeMap::new();
         let mut keyboard = Keyboard {
             persistent,
             held: BTreeSet::new(),
         };
-        let mut runs = Vec::new();
-        let mut keys = BTreeMap::new();
-        for row in &self.rows {
-            for key in row.keys.keys() {
-                keys.entry(key.clone()).or_insert(row.line);
-            }
-            if let Some((event, body)) = &row.handler {
-                let program = body.compile(BTreeSet::new());
-                for (key, line) in program.keys {
-                    keys.entry(key).or_insert(line);
-                }
-                runs.push(KeyRun {
-                    line: row.line,
-                    source: format!("ON({event})"),
-                    handler: Some((event.clone(), program.runs)),
-                    ..Default::default()
-                });
-            }
-            if row.clear_listeners || row.screenshot.is_some() {
-                runs.push(KeyRun {
-                    line: row.line,
-                    source: if row.clear_listeners {
-                        "CLEAR_LISTENERS".into()
-                    } else {
-                        row.input_source.clone()
-                    },
-                    clear_listeners: row.clear_listeners,
-                    screenshot: row.screenshot.clone(),
-                    ..Default::default()
-                });
-            }
-            if row.wait > 0 || row.wait_mouse || row.clear {
-                runs.push(KeyRun {
-                    line: row.line,
-                    source: if row.clear {
-                        "CLEAR".into()
-                    } else if row.wait_mouse {
-                        "WaitMouseMove()".into()
-                    } else {
-                        format!("Wait({})", row.wait)
-                    },
-                    ticks: row.wait,
-                    held: keyboard.persistent.clone(),
-                    wait_mouse: row.wait_mouse,
-                    clear: row.clear,
-                    ..KeyRun::default()
-                });
-            }
-            if row.has_input() {
-                runs.push(KeyRun {
-                    line: row.line,
-                    ticks: 1,
-                    held: keyboard.step(row.line, Some(&row.keys)).held,
-                    source: row.input_source.clone(),
-                    moves: row.moves.clone(),
-                    buttons: wire_actions(&row.buttons),
-                    key_actions: wire_actions(&row.keys),
-                    ..KeyRun::default()
-                });
-            }
-            if row.pause {
-                runs.push(KeyRun {
-                    line: row.line,
-                    source: "PAUSE".into(),
-                    pause: true,
-                    ..KeyRun::default()
-                });
-            }
-        }
+        let runs = compile_block(&self.rows, &mut keyboard, &mut keys);
+        let functions = self
+            .functions
+            .iter()
+            .map(|(name, rows)| {
+                (
+                    name.clone(),
+                    compile_block(rows, &mut Keyboard::default(), &mut keys),
+                )
+            })
+            .collect();
         DispatchProgram {
             runs,
+            functions,
             persistent: keyboard.persistent,
             keys,
         }
     }
+}
+
+fn compile_block(
+    rows: &[Row],
+    keyboard: &mut Keyboard,
+    keys: &mut BTreeMap<String, usize>,
+) -> Vec<KeyRun> {
+    let mut runs = Vec::new();
+    for row in rows {
+        for key in row.keys.keys() {
+            keys.entry(key.clone())
+                .and_modify(|line| *line = (*line).min(row.line))
+                .or_insert(row.line);
+        }
+        if let Some((event, body)) = &row.handler {
+            runs.push(KeyRun {
+                line: row.line,
+                source: format!("ON({event})"),
+                handler: Some((
+                    event.clone(),
+                    compile_block(body, &mut Keyboard::default(), keys),
+                )),
+                ..Default::default()
+            });
+        }
+        if row.clear_listeners || row.screenshot.is_some() || row.control.is_some() {
+            runs.push(KeyRun {
+                line: row.line,
+                source: if row.clear_listeners {
+                    "CLEAR_LISTENERS".into()
+                } else {
+                    row.input_source.clone()
+                },
+                clear_listeners: row.clear_listeners,
+                screenshot: row.screenshot.clone(),
+                control: row.control.clone(),
+                ..Default::default()
+            });
+        }
+        if row.wait > 0 || row.wait_mouse || row.clear {
+            runs.push(KeyRun {
+                line: row.line,
+                source: if row.clear {
+                    "CLEAR".into()
+                } else if row.wait_mouse {
+                    "WaitMouseMove()".into()
+                } else {
+                    format!("Wait({})", row.wait)
+                },
+                ticks: row.wait,
+                held: keyboard.persistent.clone(),
+                wait_mouse: row.wait_mouse,
+                clear: row.clear,
+                ..KeyRun::default()
+            });
+        }
+        if row.has_input() {
+            runs.push(KeyRun {
+                line: row.line,
+                ticks: 1,
+                held: keyboard.step(row.line, Some(&row.keys)).held,
+                source: row.input_source.clone(),
+                moves: row.moves.clone(),
+                buttons: wire_actions(&row.buttons),
+                key_actions: wire_actions(&row.keys),
+                ..KeyRun::default()
+            });
+        }
+        if row.pause {
+            runs.push(KeyRun {
+                line: row.line,
+                source: "PAUSE".into(),
+                pause: true,
+                ..KeyRun::default()
+            });
+        }
+    }
+    runs
 }
 
 #[cfg(test)]

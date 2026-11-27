@@ -40,6 +40,28 @@ pub(crate) enum KeyAction {
 
 pub(crate) type Keys = BTreeMap<String, KeyAction>;
 
+/// Zero-tick function control dispatched by the game.
+#[derive(Clone, Debug)]
+pub enum FunctionControl {
+    /// The case-sensitive function name without its leading `$`.
+    Call(String),
+    Return,
+}
+
+fn function_name(name: &str) -> Result<&str, String> {
+    if let Some(bare) = name.strip_prefix('$') {
+        let mut bytes = bare.bytes();
+        if bytes
+            .next()
+            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+            && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            return Ok(bare);
+        }
+    }
+    Err(format!("invalid function name {name:?}"))
+}
+
 // Consume one command including nested unit expressions. Whitespace separates
 // neighboring commands only after the outer closing parenthesis.
 fn next_command(code: &str) -> Result<(&str, &str, &str), String> {
@@ -138,10 +160,11 @@ pub(crate) struct Row {
     pub wait_mouse: bool,
     pub clear: bool,
     pub pause: bool,
-    pub handler: Option<(String, Script)>,
+    pub handler: Option<(String, Vec<Row>)>,
     pub clear_listeners: bool,
     pub screenshot: Option<String>,
     pub input_source: String,
+    pub control: Option<FunctionControl>,
 }
 
 impl Row {
@@ -155,6 +178,31 @@ impl Row {
             wait: u64::from(code.is_empty()),
             ..Self::default()
         };
+        if code.starts_with('$') {
+            let (name, arguments) = code
+                .split_once('(')
+                .ok_or_else(|| format!("expected a function call, got {code:?}"))?;
+            let name = function_name(name)?;
+            if !arguments
+                .strip_suffix(')')
+                .is_some_and(|args| args.trim().is_empty())
+            {
+                return Err(format!(
+                    "${name}() takes no arguments and must be on its own line"
+                ));
+            }
+            row.control = Some(FunctionControl::Call(name.to_owned()));
+            row.input_source = code.to_owned();
+            return Ok(row);
+        }
+        if code == "RETURN" {
+            row.control = Some(FunctionControl::Return);
+            row.input_source = code.to_owned();
+            return Ok(row);
+        }
+        if code.split_whitespace().next() == Some("RETURN") {
+            return Err("RETURN must be on its own line".into());
+        }
         if code == "CLEAR_LISTENERS" {
             row.clear_listeners = true;
             return Ok(row);
@@ -251,26 +299,16 @@ impl Row {
 #[derive(Debug)]
 pub struct Script {
     pub(crate) rows: Vec<Row>,
+    pub(crate) functions: BTreeMap<String, Vec<Row>>,
 }
 
 impl Script {
-    /// Validate the entire block before making any input available to the caller.
+    /// Validate the entry block and every function before making any input available.
     pub fn parse(text: &str) -> Result<Self, ParseError> {
-        enum Scope {
-            Before,
-            Inside,
-            After,
-        }
-        let mut scope = Scope::Before;
-        let mut rows = Vec::new();
-        let mut pending: Option<(usize, String)> = None;
-        let mut handler: Option<(usize, String, Vec<Row>)> = None;
-        let mut eof = 1;
-        for (index, raw) in text.lines().enumerate() {
-            let line = index + 1;
-            eof = line + 1;
+        let eof = text.lines().count() + 1;
+        let mut source = text.lines().enumerate().filter_map(|(index, raw)| {
             if raw.trim_start().starts_with("//") {
-                continue;
+                return None;
             }
             let code = if raw.trim_start().starts_with("ScreenShot(") {
                 raw.trim()
@@ -279,72 +317,116 @@ impl Script {
                     .map_or(raw, |(prefix, _)| prefix)
                     .trim()
             };
-            let error = |message: String| ParseError { line, message };
-            if let Some((decl, event)) = pending.take() {
-                if code != "BEGIN" {
-                    return Err(error("expected BEGIN after ON declaration".into()));
-                }
-                handler = Some((decl, event, Vec::new()));
+            Some((index + 1, code))
+        });
+        let mut functions = BTreeMap::new();
+        let rows = loop {
+            let (line, code) = source
+                .next()
+                .ok_or_else(|| parse_error(eof, "missing BEGIN"))?;
+            if code.is_empty() {
                 continue;
             }
-            if let Some((_, _, body)) = &mut handler {
-                if code == "END" {
-                    let (decl, event, rows_in_handler) = handler.take().unwrap();
-                    rows.push(Row {
-                        line: decl,
-                        handler: Some((
-                            event,
-                            Script {
-                                rows: rows_in_handler,
-                            },
-                        )),
-                        ..Default::default()
-                    });
-                } else {
-                    body.push(Row::parse(line, code).map_err(error)?);
-                }
-                continue;
+            if code == "BEGIN" {
+                break parse_block(&mut source, eof, true)?;
             }
-            match (&scope, code) {
-                (Scope::Before, "BEGIN") => scope = Scope::Inside,
-                (Scope::Inside, "END") => scope = Scope::After,
-                (Scope::Inside, body) if body.starts_with("ON(") => {
-                    let (_, name, rest) = next_command(body).map_err(error)?;
-                    if !rest.is_empty()
-                        || !matches!(name, "Hurt" | "HpLost" | "Death" | "CollideX" | "CollideZ")
-                    {
-                        return Err(error(format!(
-                            "invalid ON declaration {body:?}: expected one supported event on its own line"
-                        )));
-                    }
-                    pending = Some((line, name.to_owned()));
-                }
-                (Scope::Inside, body) => rows.push(Row::parse(line, body).map_err(error)?),
-                (_, "") => (),
-                (Scope::Before, _) => {
-                    return Err(ParseError {
-                        line,
-                        message: "expected BEGIN".into(),
-                    });
-                }
-                (Scope::After, _) => {
-                    return Err(ParseError {
-                        line,
-                        message: "unexpected input after END".into(),
-                    });
-                }
+            let declaration = code
+                .strip_prefix("FUNCTION")
+                .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+                .ok_or_else(|| parse_error(line, "expected BEGIN"))?;
+            let name =
+                function_name(declaration.trim()).map_err(|message| parse_error(line, message))?;
+            if functions.contains_key(name) {
+                return Err(parse_error(line, format!("duplicate function ${name}")));
             }
+            expect_begin(&mut source, eof, "FUNCTION")?;
+            functions.insert(name.to_owned(), parse_block(&mut source, eof, true)?);
+        };
+        if let Some((line, _)) = source.find(|(_, code)| !code.is_empty()) {
+            return Err(parse_error(line, "unexpected input after END"));
         }
-        match scope {
-            Scope::After => Ok(Self { rows }),
-            Scope::Before => Err(ParseError {
-                line: eof,
-                message: "missing BEGIN".into(),
-            }),
-            Scope::Inside => Err(ParseError {
-                line: eof,
-                message: "missing END".into(),
-            }),
+        if let Some((line, name)) = functions
+            .values()
+            .chain(std::iter::once(&rows))
+            .flat_map(|body| block_rows(body))
+            .filter_map(|row| match &row.control {
+                Some(FunctionControl::Call(name)) if !functions.contains_key(name) => {
+                    Some((row.line, name))
+                }
+                _ => None,
+            })
+            .min_by_key(|(line, _)| *line)
+        {
+            return Err(parse_error(line, format!("undefined function ${name}")));
+        }
+        Ok(Self { rows, functions })
+    }
+
+    pub(crate) fn uses_functions(&self) -> bool {
+        !self.functions.is_empty() || block_rows(&self.rows).any(|row| row.control.is_some())
+    }
+}
+
+// Only entry and function bodies can declare listeners, so one pass through
+// those bodies and their immediate handlers visits the entire lexical block.
+fn block_rows(rows: &[Row]) -> impl Iterator<Item = &Row> {
+    rows.iter()
+        .flat_map(|row| std::iter::once(row).chain(row.handler.iter().flat_map(|(_, body)| body)))
+}
+
+fn parse_error(line: usize, message: impl Into<String>) -> ParseError {
+    ParseError {
+        line,
+        message: message.into(),
+    }
+}
+
+fn expect_begin<'a>(
+    source: &mut impl Iterator<Item = (usize, &'a str)>,
+    eof: usize,
+    declaration: &str,
+) -> Result<(), ParseError> {
+    match source.next() {
+        Some((_, "BEGIN")) => Ok(()),
+        next => Err(parse_error(
+            next.map_or(eof, |(line, _)| line),
+            format!("expected BEGIN after {declaration} declaration"),
+        )),
+    }
+}
+
+fn parse_block<'a>(
+    source: &mut impl Iterator<Item = (usize, &'a str)>,
+    eof: usize,
+    allow_listeners: bool,
+) -> Result<Vec<Row>, ParseError> {
+    let mut rows = Vec::new();
+    while let Some((line, code)) = source.next() {
+        if code == "END" {
+            return Ok(rows);
+        }
+        let error = |message| parse_error(line, message);
+        if code.starts_with("ON(") {
+            if !allow_listeners {
+                return Err(error("ON cannot be nested inside an event handler".into()));
+            }
+            let (_, name, rest) = next_command(code).map_err(error)?;
+            if !rest.is_empty()
+                || !matches!(name, "Hurt" | "HpLost" | "Death" | "CollideX" | "CollideZ")
+            {
+                return Err(error(format!(
+                    "invalid ON declaration {code:?}: expected one supported event on its own line"
+                )));
+            }
+            expect_begin(source, eof, "ON")?;
+            rows.push(Row {
+                line,
+                handler: Some((name.to_owned(), parse_block(source, eof, false)?)),
+                ..Row::default()
+            });
+        } else {
+            rows.push(Row::parse(line, code).map_err(error)?);
         }
     }
+    Err(parse_error(eof, "missing END"))
 }
